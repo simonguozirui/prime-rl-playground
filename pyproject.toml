@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "ZeroBand is a production ready codebase for decentralized training of LLM"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["torch==2.4.1","numpy", "setuptools"]
+dependencies = ["torch==2.4.1","numpy", "setuptools", "transformers>=4.44.2", "datasets>=3.0.0"]
 
 [build-system]
 requires = ["hatchling"]
