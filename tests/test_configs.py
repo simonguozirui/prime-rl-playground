@@ -8,12 +8,22 @@ from zeroband.train import Config
 import pytest
 import tomli
 
-config_file_names = [file for file in os.listdir("configs") if file.endswith(".toml")]
+
+def get_all_toml_files(directory):
+    toml_files = []
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith(".toml"):
+                toml_files.append(os.path.join(root, file))
+    return toml_files
 
 
-@pytest.mark.parametrize("config_file_name", config_file_names)
-def test_load_config(config_file_name):
-    with open(f"configs/{config_file_name}", "rb") as f:
+config_file_paths = get_all_toml_files("configs")
+
+
+@pytest.mark.parametrize("config_file_path", config_file_paths)
+def test_load_config(config_file_path):
+    with open(f"{config_file_path}", "rb") as f:
         content = tomli.load(f)
     config = Config(**content)
     assert config is not None
