@@ -28,9 +28,9 @@ def get_logger():
 
     if world_info.local_rank == 0:
         log_level = os.getenv("ZERO_BAND_LOG_LEVEL", "INFO")
-        logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
+        logger.setLevel(level=getattr(logging, log_level, logging.INFO))
     else:
-        logging.basicConfig(level=logging.CRITICAL)  # Disable logging for non-zero ranks
+        logger.setLevel(level=logging.CRITICAL)  # Disable logging for non-zero ranks
 
     handler = logging.StreamHandler()
     handler.setFormatter(CustomFormatter(world_info.local_rank))
