@@ -8,6 +8,7 @@ install uv
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.cargo/env
 uv sync --extra all
 ```
 
