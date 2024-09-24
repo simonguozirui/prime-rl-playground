@@ -54,8 +54,8 @@ def _collate_fn_causal_mask(
         elif len(input_ids) > max_seq_length:
             input_ids = input_ids[:max_seq_length]
 
-        batched["input_ids"].append(input_ids[1:])
-        batched["labels"].append(input_ids[:-1])
+        batched["input_ids"].append(input_ids[:-1])
+        batched["labels"].append(input_ids[1:])
 
     return {"input_ids": torch.stack(batched["input_ids"], dim=0), "labels": torch.stack(batched["labels"], dim=0)}
 
