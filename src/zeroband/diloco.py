@@ -102,7 +102,10 @@ class Diloco:
 
                 # gloo does not support AVG
                 param_offloaded.grad = param_offloaded.grad / self.elastic_device_mesh.global_pg.size()
-                dist.all_reduce(param_offloaded.grad, op=dist.ReduceOp.SUM, group=self.elastic_device_mesh.global_pg)
+                dist.all_reduce(
+                    param_offloaded.grad, op=dist.ReduceOp.SUM, group=self.elastic_device_mesh.global_pg, async_op=True
+                )
+                # todo async here
 
     def sync_inner_model(self, model: nn.Module):
         """
@@ -113,7 +116,7 @@ class Diloco:
             # here each rank has a shard of the model in memory so all rank do the sync
             self._logger.debug("sync inner model")
             for param_offloaded, param in zip(self.cpu_model, model.parameters()):
-                param.data = param_offloaded.data.to("cuda")
+                param.data = param_offloaded.data.to("cuda")  # todo: use copy_ here
 
         elif self.fsdp_sharding_strategy in [ShardingStrategy.SHARD_GRAD_OP, ShardingStrategy.NO_SHARD]:
             self._logger.debug("sync inner model")
