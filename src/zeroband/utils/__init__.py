@@ -1,3 +1,4 @@
+import time
 import torch
 from torch.distributed.fsdp import ShardingStrategy
 
@@ -66,3 +67,23 @@ def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False) -> i
     if exclude_embedding:
         num_params -= model.tok_embeddings.weight.numel()
     return num_params
+
+
+class PerfCounter:
+    """A class to count tokens per second with a rolling window.
+    we use a rollowing window because time perf counter is not precise enough in some case
+    """
+
+    def __init__(self, window_size: int):
+        self.window_size = window_size
+        self.tokens = []
+        self.times = []
+
+    def count_tokens(self, tokens: int):
+        self.tokens.append(tokens)
+        self.times.append(time.perf_counter())
+
+    def get_tokens_per_second(self) -> float | None:
+        if len(self.tokens) < 2:
+            return None
+        return sum(self.tokens) / (self.times[-1] - self.times[0])
