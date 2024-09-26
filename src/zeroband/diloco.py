@@ -98,10 +98,8 @@ class Diloco:
 
             # gloo does not support AVG
             param_offloaded.grad = param_offloaded.grad / self.elastic_device_mesh.global_pg.size()
-            dist.all_reduce(
-                param_offloaded.grad, op=dist.ReduceOp.SUM, group=self.elastic_device_mesh.global_pg, async_op=True
-            )
-            # todo async here
+            dist.all_reduce(param_offloaded.grad, op=dist.ReduceOp.SUM, group=self.elastic_device_mesh.global_pg)
+            # todo maybe do async here
 
     def sync_inner_model(self, model: nn.Module):
         """
