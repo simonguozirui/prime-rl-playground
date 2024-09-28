@@ -4,7 +4,6 @@ from typing import Literal
 
 import torch
 from pydantic_config import parse_argv, BaseConfig
-from torch.distributed import destroy_process_group, init_process_group
 from einops import rearrange
 from torch.nn import functional as F
 
@@ -18,9 +17,10 @@ from torch.distributed.fsdp import (
 )
 import torch.distributed as dist
 from zeroband import utils
-from zeroband.diloco import Diloco, DilocoConfig, ElasticDeviceMesh
+from zeroband.diloco import Diloco, DilocoConfig
+from zeroband.comms import ElasticDeviceMesh
 
-from zeroband.utils import PerfCounter, get_model_hash, get_sharding_strategy
+from zeroband.utils import PerfCounter, get_module_signature, get_sharding_strategy
 from zeroband.utils.monitor import WandbMonitor, DummyMonitor
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.models.llama import get_model
@@ -85,8 +85,8 @@ def train(config: Config):
 
     train_dataloader = get_dataloader(
         tokenizer=tokenizer,
-        world_size=world_info.world_size,
-        rank=world_info.rank,
+        world_size=world_info.world_size * world_info.global_world_size,
+        rank=world_info.rank + world_info.global_rank * world_info.global_world_size,
         seq_length=config.data.seq_length,
         batch_size=config.train.micro_bs,
         num_workers=config.data.num_workers,
@@ -95,12 +95,14 @@ def train(config: Config):
     model, model_config = get_model(
         config.name_model,
         config.type_model,
-        vocab_size=tokenizer.vocab_size if config.name_model != "debugmodel" else TEST_VOCAB_SIZE,
+        vocab_size=tokenizer.vocab_size
+        if config.name_model != "debugmodel" or not config.data.fake
+        else TEST_VOCAB_SIZE,
     )
 
     if config.train.log_model_hash:
         # Compute SHA256 hash
-        logger.info(f"Model hash: {get_model_hash(model)}")
+        logger.info(f"Model hash: {get_module_signature(model)}")
 
     model = model.to(world_info.local_rank)
     logger.debug("model loaded")
@@ -139,9 +141,6 @@ def train(config: Config):
     )
 
     if config.diloco is not None:
-        if world_info.local_world_size == 1:
-            raise ValueError("Diloco is not supported for local_world_size == 1 because of a pytorch bug")
-
         diloco = Diloco(config.diloco, model, sharding_strategy, elastic_device_mesh.global_pg)
 
     scheduler = get_cosine_schedule_with_warmup(
@@ -231,7 +230,13 @@ def train(config: Config):
             logger.info(log)
 
         if config.diloco is not None:
+            if config.train.log_model_hash:
+                with FSDP.summon_full_params(model):
+                    logger.debug("Pre diloco model: %s", get_module_signature(model))
             diloco.step(model)
+            if config.train.log_model_hash:
+                with FSDP.summon_full_params(model):
+                    logger.debug("Post diloco model: %s", get_module_signature(model))
 
         outer_step += 1
 
@@ -255,11 +260,9 @@ if __name__ == "__main__":
     world_info = get_world_info()
     logger = get_logger()
 
-    init_process_group()
     torch.cuda.set_device(world_info.local_rank)
 
     config = Config(**parse_argv())
     logger.debug(f"config: {config.model_dump()}")
 
     train(config)
-    destroy_process_group()

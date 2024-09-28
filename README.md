@@ -2,7 +2,7 @@
 ZeroBand is a production ready codebase for decentralized training of LLM
 
 
-## developlment
+## Development
 
 install uv
 
@@ -40,28 +40,28 @@ run your code using
 uv run ...
 ```
 
-## quick check
+## Quick check
 
 To check that everything is working you can do
 
 ```bash
-ZERO_BAND_LOG_LEVEL=DEBUG torchrun  --nproc_per_node=2 src/zeroband/train.py @configs/debug/normal.toml
+ZERO_BAND_LOG_LEVEL=DEBUG torchrun --nproc_per_node=2 src/zeroband/train.py @configs/debug/normal.toml
 ```
 
-## run diloco
+## Run diloco
 
 To run diloco locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh` 
 
 :note: you need 4 gpus to run the following command
 
 ```bash
-ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node.sh 2 2 src/zeroband/train.py @configs/debug/diloco.toml
+ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 2 src/zeroband/train.py @configs/debug/diloco.toml
 ```
 
 if you have only two gpus
 
 ```bash
-ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node.sh 2 1 src/zeroband/train.py @configs/debug/diloco.toml
+ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 src/zeroband/train.py @configs/debug/diloco.toml
 ```
 
 One gpu is not supported at the moment because of a fsdp bug in our implementation.
@@ -71,8 +71,15 @@ One gpu is not supported at the moment because of a fsdp bug in our implementati
 You need a machine with a least two gpus to run the full test suite.
 
 Some test must be run from the root directory.
-
 ```bash
 uv run pytest
 ```
 
+## Environment variables
+| Environment Variable  | Description                                      | Default Value |
+|-----------------------|--------------------------------------------------|---------------|
+| `GLOBAL_UNIQUE_ID`    | Unique identifier worker in global store.        | `None`  |
+| `GLOBAL_ADDR`         | IP Address of the global store                   | `None`  |
+| `GLOBAL_PORT`         | Port number of the global store.                 | `None` |
+| `GLOBAL_WORLD_SIZE`   | The size of the global process group.            | `1` |
+| `GLOBAL_RANK`         | Rank of the process in the global process group. | `0` |
