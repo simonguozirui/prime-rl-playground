@@ -75,6 +75,13 @@ Some test must be run from the root directory.
 uv run pytest
 ```
 
+## Potential foot gun to avoid:
+
+if you have a datasets error at the beginning of training try to use the following env var
+```
+HF_HUB_ETAG_TIMEOUT=500
+```
+
 ## Environment variables
 | Environment Variable  | Description                                      | Default Value |
 |-----------------------|--------------------------------------------------|---------------|
