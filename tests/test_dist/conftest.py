@@ -69,3 +69,17 @@ def dist_environment() -> callable:
                 destroy_process_group()
 
     return dist_environment
+
+
+@pytest.fixture()
+def mock_env() -> callable:
+    @contextmanager
+    def env(**kwargs):
+        kwargs = {k.upper(): str(v) for k, v in kwargs.items()}
+        with mock.patch.dict(
+            os.environ,
+            kwargs,
+        ):
+            yield
+
+    return env
