@@ -117,17 +117,15 @@ def test_elastic_device_mesh_on_off_ramp(world_size: int, global_world_size: int
             assert edm.mesh_count == 1
             assert edm.global_pg.size() == global_world_size + 1
 
-            if test_value == 1:
-                edm._queue_leave()
-
             a = torch.arange(3) * (test_value + 1)
             sum_ints = global_world_size * (global_world_size + 1) // 2 + 100
             dist.all_reduce(a, op=dist.ReduceOp.SUM, group=edm.global_pg)
             assert torch.allclose(a, torch.tensor([0, sum_ints, 2 * sum_ints]))
 
-            edm.maybe_reinit_global_pg()
             if test_value == 1:
                 return
+            time.sleep(2)
+            edm.maybe_reinit_global_pg()
             assert edm.mesh_count == 2
             assert edm.global_pg.size() == global_world_size
 
