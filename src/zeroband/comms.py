@@ -320,6 +320,7 @@ class ElasticDeviceMesh:
         self.global_pg = dist.ProcessGroupGloo(
             prefix_store, self.world_info.global_rank, self.world_info.global_world_size, TCPSTORE_TIMEOUT
         )
+        self._logger.debug("Successfully recreated process group")
 
         if self._global_leader:
             self._clear_joiners()
@@ -330,6 +331,7 @@ class ElasticDeviceMesh:
             self.global_store.set(f"rank_{self.world_info.global_unique_id}", str(self.world_info.global_rank))
         # Without this barrier, a node might queue leave before the leaving queue is cleared
         dist.barrier(self.global_pg)
+        self._logger.debug("Reinitialized global_pg done in %s seconds", time.perf_counter() - time_start)
 
     def get_global_pg(self, maybe_reinit: bool = False) -> dist.ProcessGroup:
         """Get the global process group. If maybe_reinit is True, reinitialize the global process group if needed."""
