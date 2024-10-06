@@ -22,6 +22,10 @@ Install deps
 ```
 uv sync --extra all
 ```
+downlaod submodules
+```
+git submodule update --init --recursive
+```
 
 
 copy paste to full command:
@@ -31,6 +35,7 @@ source $HOME/.cargo/env
 uv venv
 source .venv/bin/activate
 uv sync --extra all
+git submodule update --init --recursive
 ```
 
 
