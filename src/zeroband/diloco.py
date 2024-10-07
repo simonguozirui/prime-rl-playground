@@ -16,6 +16,8 @@ class DilocoConfig(BaseConfig):
     inner_steps: int
     compression: Compression = Compression.NO
 
+    retry_all_reduce: int = 3
+
 
 class Diloco:
     """
@@ -85,10 +87,18 @@ class Diloco:
             if param.shape[0] == 0:
                 continue
 
-            grad = param_offloaded.data.to_local() - param.data.to_local().to(param_offloaded.data.device)
-            grad = grad / global_pg.size()
-
-            all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg)
+            for i in range(self.config.retry_all_reduce):
+                try:
+                    grad = param_offloaded.data.to_local() - param.data.to_local().to(param_offloaded.data.device)
+                    grad = grad / global_pg.size()
+                    all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg)
+                    # self._logger.debug(f"all_reduce {i} done")
+                    break
+                except RuntimeError as e:
+                    self._logger.error(
+                        f"Error syncing pseudo gradient: {e}, retry {i+1}/{self.config.retry_all_reduce}"
+                    )
+                    global_pg = self.elastic_device_mesh.get_global_pg(maybe_reinit=True)
 
             param_offloaded.grad.to_local().copy_(grad)
 
