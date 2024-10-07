@@ -19,7 +19,7 @@ from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
 
-from zeroband.utils import GPUMemoryMonitor, PerfCounter, get_module_signature, get_sharding_strategy
+from zeroband.utils import GPUMemoryMonitor, PerfCounter, get_module_signature
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.monitor import WandbMonitor, DummyMonitor
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
@@ -55,8 +55,8 @@ class MemoryProfilerConfig(BaseConfig):
 class TrainConfig(BaseConfig):
     micro_bs: int
     torch_compile: bool = True
-    sharding_strategy: str = "SHARD_GRAD_OP"
     ac_ckpt: bool | int = False
+    reshard_after_forward: bool = False  # old shard grad op False mean full shard
 
     reduce_fp32: bool = False  # should be True if SXM. Keep to false as default for backward compatibility
 
@@ -92,8 +92,6 @@ class Config(BaseConfig):
 
 
 def train(config: Config):
-    sharding_strategy = get_sharding_strategy(config.train.sharding_strategy)
-
     # batch_size is the total batch size for all GPUs
     assert config.optim.batch_size % world_info.local_world_size == 0
     batch_size = config.optim.batch_size // world_info.local_world_size
@@ -159,14 +157,22 @@ def train(config: Config):
     )
 
     for layer_id, transformer_block in model.layers.items():
-        reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        if config.train.reshard_after_forward:
+            reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        else:
+            reshard_after_forward = False
         fully_shard(
             transformer_block,
             mp_policy=mp_policy,
             mesh=elastic_device_mesh.cuda_local_mesh,
             reshard_after_forward=reshard_after_forward,
         )
-    fully_shard(model, mp_policy=mp_policy, mesh=elastic_device_mesh.cuda_local_mesh)
+    fully_shard(
+        model,
+        mp_policy=mp_policy,
+        mesh=elastic_device_mesh.cuda_local_mesh,
+        reshard_after_forward=config.train.reshard_after_forward,
+    )
     logger.debug("model fsdped")
 
     # Setup optimizers
@@ -178,7 +184,7 @@ def train(config: Config):
     )
 
     if config.diloco is not None:
-        diloco = Diloco(config.diloco, model, sharding_strategy, elastic_device_mesh)
+        diloco = Diloco(config.diloco, model, elastic_device_mesh)
 
     scheduler = get_cosine_schedule_with_warmup(
         inner_optimizer,

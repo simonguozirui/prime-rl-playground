@@ -6,7 +6,6 @@ from zeroband.collectives import Compression, all_reduce
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
-from torch.distributed.fsdp import ShardingStrategy
 import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor
 
@@ -32,7 +31,7 @@ class Diloco:
 
     # Example usage in a training loop:
 
-    diloco = Diloco(config.diloco, model, sharding_strategy, elastic_device_mesh)
+    diloco = Diloco(config.diloco, model, elastic_device_mesh)
 
     for outer_step in range(num_outer_steps):
         for inner_step in range(config.diloco.inner_steps):
@@ -49,7 +48,6 @@ class Diloco:
         self,
         config: DilocoConfig,
         model: nn.Module,
-        fsdp_sharding_strategy: ShardingStrategy,
         elastic_device_mesh: ElasticDeviceMesh,
     ):
         self.config = config
@@ -58,14 +56,10 @@ class Diloco:
             from zeroband.C.collectives import ring_allreduce as _  # noqa: F401
             # just force compilation
 
-        self.fsdp_sharding_strategy = fsdp_sharding_strategy
         self.elastic_device_mesh = elastic_device_mesh
 
         self._logger = get_logger()
         self.world_info = get_world_info()
-
-        if self.fsdp_sharding_strategy not in [ShardingStrategy.FULL_SHARD, ShardingStrategy.SHARD_GRAD_OP]:
-            raise ValueError("Diloco only support FULL_SHARD and SHARD_GRAD_OP")
 
         self._init_offloaded_optimizer(model=model)
 
