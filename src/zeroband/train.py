@@ -1,5 +1,4 @@
 import os
-from contextlib import nullcontext
 from typing import Literal
 import time
 
@@ -12,10 +11,9 @@ from transformers import (
     AutoTokenizer,
     get_cosine_schedule_with_warmup,
 )
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-    MixedPrecision,
-)
+
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+
 import torch.distributed as dist
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
@@ -151,15 +149,19 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    elastic_device_mesh = ElasticDeviceMesh()
+    elastic_device_mesh = ElasticDeviceMesh("nccl")
 
-    model = FSDP(
-        model,
-        sharding_strategy=sharding_strategy,
-        mixed_precision=MixedPrecision(param_dtype=torch.bfloat16),
-        use_orig_params=True,
-        process_group=elastic_device_mesh.local_pg if config.diloco is not None else None,
-    )
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
+
+    for layer_id, transformer_block in model.layers.items():
+        reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        fully_shard(
+            transformer_block,
+            mp_policy=mp_policy,
+            mesh=elastic_device_mesh.cuda_local_mesh,
+            reshard_after_forward=reshard_after_forward,
+        )
+    fully_shard(model, mp_policy=mp_policy, mesh=elastic_device_mesh.cuda_local_mesh)
     logger.debug("model fsdped")
 
     # Setup optimizers
@@ -228,23 +230,24 @@ def train(config: Config):
 
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+                model.set_requires_gradient_sync(not is_accumulating)
+
                 batch = next(train_dataloader_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 labels = batch["labels"].to("cuda")
 
-                with model.no_sync() if is_accumulating else nullcontext():
-                    logits = model(tokens=input_ids).contiguous()
-                    flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                logits = model(tokens=input_ids).contiguous()
+                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
-                    loss = (
-                        F.cross_entropy(flatten_logits, flatten_labels, ignore_index=tokenizer.pad_token_id)
-                        / gradient_accumulation_steps
-                    )
-                    loss.backward()
-                    loss_batch += loss.detach()
+                loss = (
+                    F.cross_entropy(flatten_logits, flatten_labels, ignore_index=tokenizer.pad_token_id)
+                    / gradient_accumulation_steps
+                )
+                loss.backward()
+                loss_batch += loss.detach()
 
-            model.clip_grad_norm_(1.0)  # gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             inner_optimizer.step()
             scheduler.step()
             inner_optimizer.zero_grad()
@@ -301,13 +304,13 @@ def train(config: Config):
                 memory_profiler.step()
 
         if config.diloco is not None:
-            if config.train.log_model_hash:
-                with FSDP.summon_full_params(model):
-                    logger.debug("Pre diloco model: %s", get_module_signature(model))
+            # if config.train.log_model_hash:
+            # with FSDP.summon_full_params(model):
+            #     logger.debug("Pre diloco model: %s", get_module_signature(model))
             diloco.step(model)
-            if config.train.log_model_hash:
-                with FSDP.summon_full_params(model):
-                    logger.debug("Post diloco model: %s", get_module_signature(model))
+            # if config.train.log_model_hash:
+            # with FSDP.summon_full_params(model):
+            #     logger.debug("Post diloco model: %s", get_module_signature(model))
 
         training_progress.outer_step += 1
 

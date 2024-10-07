@@ -8,6 +8,7 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from torch.distributed.fsdp import ShardingStrategy
 import torch.distributed as dist
+from torch.distributed._tensor.api import DTensor
 
 
 class DilocoConfig(BaseConfig):
@@ -83,12 +84,14 @@ class Diloco:
         for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
             if param.shape[0] == 0:
                 continue
-            param_offloaded.grad = param_offloaded.data - param.data.to(param_offloaded.device)
 
-            # gloo does not support AVG
-            param_offloaded.grad = param_offloaded.grad / global_pg.size()
+            grad = param_offloaded.data.to_local() - param.data.to_local().to(param_offloaded.data.device)
+            grad = grad / global_pg.size()
 
-            all_reduce(self.config.compression, param_offloaded.grad, dist.ReduceOp.SUM, global_pg)
+            all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg)
+
+            param_offloaded.grad.to_local().copy_(grad)
+
             # todo async here
 
     def sync_inner_model(self, model: nn.Module):
@@ -98,7 +101,7 @@ class Diloco:
 
         self._logger.debug("sync inner model")
         for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
-            param.data.copy_(param_offloaded.data)  # todo: use copy_ here
+            param.data.to_local().copy_(param_offloaded.data.to_local())
 
     def get_offloaded_param(self, model: nn.Module) -> list[nn.Parameter]:
         """
@@ -108,7 +111,22 @@ class Diloco:
 
         for param in model.parameters():
             if param.requires_grad:
-                offloaded_param = param.data.detach().clone().to("cpu")
+                # so here we copy the DTensor from gpu to cpu. The trick is that we need to recreate the DTensor with the correct
+                # cpu devise mesh, otherwise we have a cpu DTensor with a cuda device mesh which will fail to do any communication
+
+                offloaded_param = nn.Parameter(
+                    DTensor.from_local(
+                        param.data.to_local().detach().to("cpu"),
+                        device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                        placements=param.data.placements,
+                    )
+                )
+                offloaded_param.grad = DTensor.from_local(
+                    torch.zeros_like(param.data.to_local()),
+                    device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                    placements=param.data.placements,
+                )
+                # here we pre-allocate the grad DTensor on cpu.
                 offloaded_param.requires_grad = True
                 offloaded_params.append(offloaded_param)
 
@@ -124,6 +142,5 @@ class Diloco:
 
         if self.outer_optimizer is not None:
             self.outer_optimizer.step()
-            self.outer_optimizer.zero_grad()  # todo(sami): check if we can remove this
 
         self.sync_inner_model(model)
