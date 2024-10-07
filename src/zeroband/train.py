@@ -57,6 +57,9 @@ class TrainConfig(BaseConfig):
     torch_compile: bool = True
     sharding_strategy: str = "SHARD_GRAD_OP"
     ac_ckpt: bool | int = False
+
+    reduce_fp32: bool = False  # should be True if SXM. Keep to false as default for backward compatibility
+
     log_model_hash: bool = False
 
     memory_monitor: bool = False
@@ -151,7 +154,9 @@ def train(config: Config):
 
     elastic_device_mesh = ElasticDeviceMesh("nccl")
 
-    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+    )
 
     for layer_id, transformer_block in model.layers.items():
         reshard_after_forward = int(layer_id) < len(model.layers) - 1
