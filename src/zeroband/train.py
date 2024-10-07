@@ -304,13 +304,13 @@ def train(config: Config):
                 memory_profiler.step()
 
         if config.diloco is not None:
-            # if config.train.log_model_hash:
-            # with FSDP.summon_full_params(model):
-            #     logger.debug("Pre diloco model: %s", get_module_signature(model))
+            if config.train.log_model_hash:
+                logger.debug("Pre diloco model: %s", get_module_signature(model))
+
             diloco.step(model)
-            # if config.train.log_model_hash:
-            # with FSDP.summon_full_params(model):
-            #     logger.debug("Post diloco model: %s", get_module_signature(model))
+
+            if config.train.log_model_hash:
+                logger.debug("Post diloco model: %s", get_module_signature(model))
 
         training_progress.outer_step += 1
 

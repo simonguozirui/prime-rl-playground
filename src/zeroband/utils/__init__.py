@@ -3,6 +3,7 @@ import time
 from typing import Any
 import torch
 from torch.distributed.fsdp import ShardingStrategy
+from torch.distributed._tensor.api import DTensor
 
 from zeroband.utils.logging import get_logger
 
@@ -105,6 +106,10 @@ def get_tensor_signature(a: torch.Tensor | torch.nn.Parameter) -> str:
     """
     while isinstance(a, torch.nn.Parameter):
         a = a.data
+
+    if isinstance(a, DTensor):
+        a = a.full_tensor()
+
     if a.numel() < TENSOR_SIG_SAMPLE_SIZE:
         b = a.as_strided(size=(a.numel(),), stride=(1,))
     else:
