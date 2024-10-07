@@ -16,7 +16,9 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     MixedPrecision,
 )
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 import torch.distributed as dist
+from torch.nn.utils import clip_grad_norm_
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
@@ -74,7 +76,7 @@ class CkptConfig(BaseConfig):
 
 class Config(BaseConfig):
     # main config
-    name_model: Literal["debugmodel", "150M", "271M", "1B", "7B", "13B", "26B", "70B"] = "150M"
+    name_model: Literal["debugmodel", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
     type_model: Literal["llama2", "llama3"] = "llama2"
 
     project: str = "zeroband"
@@ -153,14 +155,25 @@ def train(config: Config):
 
     elastic_device_mesh = ElasticDeviceMesh()
 
-    model = FSDP(
-        model,
-        sharding_strategy=sharding_strategy,
-        mixed_precision=MixedPrecision(param_dtype=torch.bfloat16),
-        use_orig_params=True,
-        process_group=elastic_device_mesh.local_pg if config.diloco is not None else None,
-    )
-    logger.debug("model fsdped")
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
+    fsdp_config = {"mp_policy": mp_policy}
+    for layer_id, transformer_block in model.layers.items():
+        reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        fully_shard(
+            transformer_block,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+        )
+    fully_shard(model, **fsdp_config)
+
+    # model = FSDP(
+    #     model,
+    #     sharding_strategy=sharding_strategy,
+    #     mixed_precision=MixedPrecision(param_dtype=torch.bfloat16),
+    #     use_orig_params=True,
+    #     process_group=elastic_device_mesh.local_pg if config.diloco is not None else None,
+    # )
+    logger.debug("model fsdped2")
 
     # Setup optimizers
     inner_optimizer = torch.optim.AdamW(
@@ -229,22 +242,40 @@ def train(config: Config):
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 batch = next(train_dataloader_iterator)
+                
+                model.set_requires_gradient_sync(not is_accumulating)
+
+                                # Profile memory before moving tensors to GPU
+                print(f"Memory before moving tensors to GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+                
                 input_ids = batch["input_ids"].to("cuda")
                 labels = batch["labels"].to("cuda")
+                
+                # Profile memory after moving tensors to GPU
+                print(f"Memory after moving tensors to GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+                print(f"Max memory allocated: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
-                with model.no_sync() if is_accumulating else nullcontext():
-                    logits = model(tokens=input_ids).contiguous()
-                    flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                # with model.no_sync() if is_accumulating else nullcontext():
+                logits = model(tokens=input_ids).contiguous()
+                
+                # Profile memory after the forward pass
+                print(f"Memory after forward pass: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
 
-                    loss = (
-                        F.cross_entropy(flatten_logits, flatten_labels, ignore_index=tokenizer.pad_token_id)
-                        / gradient_accumulation_steps
-                    )
-                    loss.backward()
-                    loss_batch += loss.detach()
+                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
-            model.clip_grad_norm_(1.0)  # gradient clipping
+                loss = (
+                    F.cross_entropy(flatten_logits, flatten_labels, ignore_index=tokenizer.pad_token_id)
+                    / gradient_accumulation_steps
+                )
+                loss.backward()
+                loss_batch += loss.detach()
+
+                # Profile memory after backward pass
+                print(f"Memory after backward pass: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+
+            clip_grad_norm_(model.parameters(), 1.0) # gradient clipping
+            # model.clip_grad_norm_(1.0)  
             inner_optimizer.step()
             scheduler.step()
             inner_optimizer.zero_grad()
@@ -331,6 +362,8 @@ def train(config: Config):
 
         if config.train.memory_monitor:
             logger.info(f"outer step peak gpu stats: {gpu_mem_monitor.format_peak_states()}")
+
+        print(f"Max memory allocated so far: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
         if training_progress.step >= config.optim.total_steps:
             # we only allow to break outisde of the inner loop.
