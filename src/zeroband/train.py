@@ -245,21 +245,21 @@ def train(config: Config):
                 
                 model.set_requires_gradient_sync(not is_accumulating)
 
-                                # Profile memory before moving tensors to GPU
-                print(f"Memory before moving tensors to GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+                # Profile memory before moving tensors to GPU
+                # print(f"Memory before moving tensors to GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
                 
                 input_ids = batch["input_ids"].to("cuda")
                 labels = batch["labels"].to("cuda")
                 
                 # Profile memory after moving tensors to GPU
-                print(f"Memory after moving tensors to GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
-                print(f"Max memory allocated: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+                # print(f"Memory after moving tensors to GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+                # print(f"Max memory allocated: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
                 # with model.no_sync() if is_accumulating else nullcontext():
                 logits = model(tokens=input_ids).contiguous()
                 
                 # Profile memory after the forward pass
-                print(f"Memory after forward pass: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+                # print(f"Memory after forward pass: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
 
                 flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
                 flatten_labels = rearrange(labels, "b seq -> (b seq)")
@@ -272,7 +272,7 @@ def train(config: Config):
                 loss_batch += loss.detach()
 
                 # Profile memory after backward pass
-                print(f"Memory after backward pass: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+                # print(f"Memory after backward pass: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
 
             clip_grad_norm_(model.parameters(), 1.0) # gradient clipping
             # model.clip_grad_norm_(1.0)  
@@ -363,7 +363,7 @@ def train(config: Config):
         if config.train.memory_monitor:
             logger.info(f"outer step peak gpu stats: {gpu_mem_monitor.format_peak_states()}")
 
-        print(f"Max memory allocated so far: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+        # print(f"Max memory allocated so far: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
         if training_progress.step >= config.optim.total_steps:
             # we only allow to break outisde of the inner loop.
