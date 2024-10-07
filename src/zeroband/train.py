@@ -1,5 +1,4 @@
 import os
-from contextlib import nullcontext
 from typing import Literal
 import time
 
@@ -14,7 +13,6 @@ from transformers import (
 )
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
-    MixedPrecision,
 )
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 import torch.distributed as dist
@@ -166,14 +164,7 @@ def train(config: Config):
         )
     fully_shard(model, **fsdp_config)
 
-    # model = FSDP(
-    #     model,
-    #     sharding_strategy=sharding_strategy,
-    #     mixed_precision=MixedPrecision(param_dtype=torch.bfloat16),
-    #     use_orig_params=True,
-    #     process_group=elastic_device_mesh.local_pg if config.diloco is not None else None,
-    # )
-    logger.debug("model fsdped2")
+    logger.debug("model fsdp2ed")
 
     # Setup optimizers
     inner_optimizer = torch.optim.AdamW(
@@ -242,24 +233,14 @@ def train(config: Config):
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 batch = next(train_dataloader_iterator)
-                
+
+                # no sync if we are accumulating gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
-                # Profile memory before moving tensors to GPU
-                # print(f"Memory before moving tensors to GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
-                
                 input_ids = batch["input_ids"].to("cuda")
                 labels = batch["labels"].to("cuda")
-                
-                # Profile memory after moving tensors to GPU
-                # print(f"Memory after moving tensors to GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
-                # print(f"Max memory allocated: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
-                # with model.no_sync() if is_accumulating else nullcontext():
                 logits = model(tokens=input_ids).contiguous()
-                
-                # Profile memory after the forward pass
-                # print(f"Memory after forward pass: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
 
                 flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
                 flatten_labels = rearrange(labels, "b seq -> (b seq)")
@@ -271,11 +252,7 @@ def train(config: Config):
                 loss.backward()
                 loss_batch += loss.detach()
 
-                # Profile memory after backward pass
-                # print(f"Memory after backward pass: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
-
-            clip_grad_norm_(model.parameters(), 1.0) # gradient clipping
-            # model.clip_grad_norm_(1.0)  
+            clip_grad_norm_(model.parameters(), 1.0)  # gradient clipping
             inner_optimizer.step()
             scheduler.step()
             inner_optimizer.zero_grad()
@@ -362,8 +339,6 @@ def train(config: Config):
 
         if config.train.memory_monitor:
             logger.info(f"outer step peak gpu stats: {gpu_mem_monitor.format_peak_states()}")
-
-        # print(f"Max memory allocated so far: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
         if training_progress.step >= config.optim.total_steps:
             # we only allow to break outisde of the inner loop.

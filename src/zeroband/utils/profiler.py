@@ -6,6 +6,7 @@ from zeroband.utils.world_info import get_world_info
 
 _MAX_ENTRIES = 10000
 
+
 class MemoryProfiler:
     """Pytorch Memory Profiler.
     The output are pickles file that can be visualized here: https://pytorch.org/memory_viz
@@ -30,12 +31,12 @@ class MemoryProfiler:
         # Save the memory summary to a file
         with open(f"{curr_snapshot_dir}/rank{self.world_info.rank}_memory_summary.txt", "w") as summary_file:
             summary_file.write(summary)
-        
+
         # Save the allocated memory as a text log
         with open(f"{curr_snapshot_dir}/rank{self.world_info.rank}_memory_allocated.txt", "w") as alloc_file:
             alloc_file.write(f"Allocated memory: {allocated_memory / 1024 ** 2:.2f} MB\n")
 
-        # Optionally, log this information using the logger
+        # log this information using the logger
         self.logger.info(f"Memory summary and allocation saved for rank {self.world_info.rank} at step {self.step_num}")
 
     def step(self):
