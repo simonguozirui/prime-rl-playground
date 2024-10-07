@@ -75,7 +75,7 @@ class CkptConfig(BaseConfig):
 
 class Config(BaseConfig):
     # main config
-    name_model: Literal["debugmodel", "150M", "271M", "1B", "7B", "13B", "26B", "70B"] = "150M"
+    name_model: Literal["debugmodel", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
     type_model: Literal["llama2", "llama3"] = "llama2"
 
     project: str = "zeroband"
@@ -235,6 +235,7 @@ def train(config: Config):
 
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+                # no sync if we are accumulating gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
                 batch = next(train_dataloader_iterator)
