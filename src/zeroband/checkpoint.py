@@ -221,10 +221,11 @@ class CkptManager:
             resume_ckpt_path = os.path.join(resume_ckpt_path, f"diloco_{world_info.diloco_rank}")
 
         dcp.load(self.states, checkpoint_id=resume_ckpt_path)
-        # since we don't load the param list from the state dict as its the same as the model one we just copy
-        if self.diloco_offloaded_param_list is not None:
-            for param_offloaded, param_model in zip(self.diloco_offloaded_param_list, self.model.parameters()):
-                param_offloaded.data.copy_(param_model.data)
+
+        self._logger.debug("sync inner model")
+        # todo(refactor): here we should rather let the diloco class handle this logic
+        for param_offloaded, param in zip(self.diloco_offloaded_param_list, self.model.parameters()):
+            param.data.to_local().copy_(param_offloaded.data.to_local())
 
         ## the next part is a fix so that each rank save a different dataloader rank. It not efficient because it reads the state two times from disk
         with open(os.path.join(resume_ckpt_path, f"__{world_info.local_rank}_0.pt"), "rb") as f:
