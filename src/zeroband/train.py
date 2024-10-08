@@ -109,7 +109,7 @@ def train(config: Config):
             config.ckpt.interval % config.diloco.inner_steps == 0
         ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
 
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True) # , add_eos_token=False, add_bos_token=False)
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
 
     logger.debug("tokenizer loaded")
 
