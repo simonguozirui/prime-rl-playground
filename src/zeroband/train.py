@@ -125,9 +125,7 @@ def train(config: Config):
     model, model_config = get_model(
         config.name_model,
         config.type_model,
-        vocab_size=len(tokenizer)
-        if config.name_model != "debugmodel" or not config.data.fake
-        else TEST_VOCAB_SIZE,
+        vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         seq_length=config.data.seq_length,
     )
 
@@ -263,7 +261,11 @@ def train(config: Config):
                 flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 loss = (
-                    F.cross_entropy(flatten_logits, flatten_labels, ignore_index=0 if config.type_model == "llama3" else tokenizer.pad_token_id)
+                    F.cross_entropy(
+                        flatten_logits,
+                        flatten_labels,
+                        ignore_index=0 if config.type_model == "llama3" else tokenizer.pad_token_id,
+                    )
                     / gradient_accumulation_steps
                 )
                 loss.backward()
