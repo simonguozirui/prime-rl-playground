@@ -131,6 +131,34 @@ def get_module_signature(module: torch.nn.Module, compress: bool = True) -> str:
         return "\n".join(f"{name}: {sig}" for name, sig in state_dict_sig.items())
 
 
+def get_optimizer_signature(optimizer: torch.optim.Optimizer, compress: bool = True) -> str:
+    """
+    Get the optimizer signature
+    """
+
+    def unwrap_tensor(state_dict: dict) -> dict:
+        new_dict = {}
+        for key, value in state_dict.items():
+            if isinstance(value, dict):
+                new_dict[key] = unwrap_tensor(value)
+            elif isinstance(value, torch.Tensor):
+                new_dict[key] = get_tensor_signature(value)
+            else:
+                new_dict[key] = str(value)
+        return new_dict
+
+    state_dict_sig = unwrap_tensor(optimizer.state_dict())
+
+    if compress:
+        return hashlib.md5(str(state_dict_sig).encode("utf-8")).hexdigest()
+    else:
+        return "\n".join(f"{name}: {sig}" for name, sig in state_dict_sig.items())
+
+
+def get_tensor_list_signature(tensor_list: list[torch.Tensor]) -> str:
+    return hashlib.md5(str(tensor_list).encode("utf-8")).hexdigest()
+
+
 class GPUMemoryMonitor:
     # inspired from https://github.com/pytorch/torchtitan/blob/eef8bb2b1b6f0875ab0581079e1511d51654910e/torchtitan/metrics.py#L32
     def __init__(self, device: str = "cuda"):
