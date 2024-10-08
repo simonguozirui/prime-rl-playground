@@ -1,6 +1,7 @@
 import os
 from typing import Literal
 import time
+from pydantic import model_validator
 
 import torch
 from pydantic_config import parse_argv, BaseConfig
@@ -66,10 +67,23 @@ class TrainConfig(BaseConfig):
 
 
 class CkptConfig(BaseConfig):
-    path: str
-    interval: int
+    path: str | None = None
+    interval: int | None = None
 
     remote_path: str | None = None  # could be a s3 path
+
+    live_recovery: bool = False
+
+    resume: str | None = None
+
+    @model_validator(mode="after")
+    def validate_path_and_interval(self):
+        if (self.path is None) != (self.interval is None):
+            raise ValueError("path and interval must be bpth set or both None")
+        if self.path is None and self.remote_path is not None:
+            raise ValueError("remote_path is set but path is not set")
+
+        return self
 
 
 class Config(BaseConfig):
@@ -86,8 +100,21 @@ class Config(BaseConfig):
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
 
-    ckpt: CkptConfig | None = None
-    resume: str | None = None
+    ckpt: CkptConfig = CkptConfig()
+
+    @model_validator(mode="after")
+    def live_reco_very_check(self):
+        if self.ckpt.live_recovery and self.diloco is None:
+            raise ValueError("Live recovery is a diloco feature. Diloco must be set if live recovery is set")
+        return self
+
+    @model_validator(mode="after")
+    def ckpt_diloco_step(self):
+        if self.ckpt is not None and self.ckpt.interval is not None and self.diloco is not None:
+            assert (
+                self.ckpt.interval % self.diloco.inner_steps == 0
+            ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
+        return self
 
 
 def train(config: Config):
@@ -151,7 +178,7 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    elastic_device_mesh = ElasticDeviceMesh()
+    elastic_device_mesh = ElasticDeviceMesh(live_recovery=config.ckpt.live_recovery)
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
@@ -203,6 +230,8 @@ def train(config: Config):
         training_progress=training_progress,
         diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None,
         diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,
+        live_ckpt_server=config.ckpt.live_recovery,
+        live_recovery_port=elastic_device_mesh.live_recovery.port if config.ckpt.live_recovery else None,
     )
 
     if config.train.torch_compile:
@@ -210,13 +239,30 @@ def train(config: Config):
         model = torch.compile(model)
         logger.debug("model compiled")
 
-    if config.resume is not None:
+    if config.ckpt.resume is not None:
         # all is inplace
-        ckpt_manager.load(resume_ckpt_path=config.resume)
+        ckpt_manager.load(resume_ckpt_path=config.ckpt.resume)
         if config.train.log_model_hash:
             logger.info(f"optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
 
-    model.train()
+    if elastic_device_mesh.live_recovery.need_live_recovery:
+        ckpt_manager.download_and_load_ckpt_from_peers(
+            elastic_device_mesh.live_recovery.get_address(0)  # always pick zero
+        )
+        elastic_device_mesh.live_recovery.need_live_recovery = False
+        training_progress.step += config.diloco.inner_steps
+
+        if config.train.log_model_hash:
+            logger.debug("Pre diloco model: %s", get_module_signature(model))
+
+        diloco.step(model, fake=True)
+
+        if config.train.log_model_hash:
+            logger.debug("Post diloco model: %s", get_module_signature(model))
+
+        # do we even need to do a fake step here ? Since the inner model and outer model are the same
+        # the tensor should automatically be zero
+        training_progress.outer_step += 1
 
     if world_info.rank == 0:
         logger_cls = WandbMonitor if config.metric_logger_type == "wandb" else DummyMonitor
@@ -244,9 +290,13 @@ def train(config: Config):
             logger.info(f"outer_step step: {training_progress.outer_step}")
 
         time_start_outer = time.perf_counter()
+
+        elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=True)
+        # at the beginning of the inner steps we allow joiner to arrive.
+        # We maybe reinit before the all reduce but only to allow leaving, not to join anymore
+
         for _inner_step in range(num_inner_steps):
             loss_batch = 0
-
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
@@ -341,13 +391,17 @@ def train(config: Config):
 
         training_progress.outer_step += 1
 
+        if config.ckpt.live_recovery:
+            # we save after each outer step sync when using shm save. Used usually for live recovery
+            ckpt_manager.save_shm()
+
         if (
-            config.ckpt is not None
+            config.ckpt.interval is not None
             and training_progress.step > 0
             and training_progress.step % config.ckpt.interval == 0
         ):
             # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
-            ckpt_manager.save(config.ckpt.path, config.ckpt.remote_path)
+            ckpt_manager.save(config.ckpt.path, config.ckpt.remote_path, already_in_shm=config.ckpt.live_recovery)
 
         if config.diloco:
             tokens_per_second = (

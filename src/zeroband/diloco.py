@@ -70,20 +70,25 @@ class Diloco:
         )
         self._logger.debug("offload model to cpu")
 
-    def sync_pseudo_gradient(self, model: nn.Module):
+    def sync_pseudo_gradient(self, model: nn.Module, fake: bool = False):
         """
         Sync the pseudo gradient from the local process group to the global process group
         """
-        self._logger.debug("sync pseudo gradient")
-        global_pg = self.elastic_device_mesh.get_global_pg(maybe_reinit=True)
+        self._logger.debug("sync pseudo gradient" + " fake" if fake else "")
 
+        self.elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
+        global_pg = self.elastic_device_mesh.global_pg
         for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
             if param.shape[0] == 0:
                 continue
 
             for i in range(self.config.retry_all_reduce):
                 try:
-                    grad = param_offloaded.data.to_local() - param.data.to_local().to(param_offloaded.data.device)
+                    if fake:
+                        grad = torch.zeros_like(param_offloaded.data.to_local())
+                    else:
+                        grad = param_offloaded.data.to_local() - param.data.to_local().to(param_offloaded.data.device)
+
                     grad = grad / global_pg.size()
                     all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg)
                     # self._logger.debug(f"all_reduce {i} done")
@@ -136,12 +141,12 @@ class Diloco:
 
         return offloaded_params
 
-    def step(self, model: nn.Module):
+    def step(self, model: nn.Module, fake: bool = False):
         """
         Step the optimizer
         """
         time_start = time.perf_counter()
-        self.sync_pseudo_gradient(model)
+        self.sync_pseudo_gradient(model, fake=fake)
         self._logger.info(f"all reduce pseudo gradient in: {time.perf_counter() - time_start} seconds")
 
         if self.outer_optimizer is not None:
