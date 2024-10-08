@@ -109,7 +109,13 @@ def train(config: Config):
             config.ckpt.interval % config.diloco.inner_steps == 0
         ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
 
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+    if config.type_model == "llama2":
+        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
+        tokenizer.pad_token = "</s>"
+    elif config.type_model == "llama3":
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+    else:
+        raise ValueError(f"Model type {config.type_model} not supported")
 
     logger.debug("tokenizer loaded")
 
@@ -121,6 +127,7 @@ def train(config: Config):
         batch_size=config.train.micro_bs,
         num_workers=config.data.num_workers,
         fake_data=config.data.fake,
+        pad_token_id=0 if config.type_model == "llama3" else tokenizer.pad_token_id,
     )
 
     model, model_config = get_model(
@@ -260,7 +267,7 @@ def train(config: Config):
                 flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 loss = (
-                    F.cross_entropy(flatten_logits, flatten_labels, ignore_index=0)
+                    F.cross_entropy(flatten_logits, flatten_labels, ignore_index=0 if config.type_model == "llama3" else tokenizer.pad_token_id)
                     / gradient_accumulation_steps
                 )
                 loss.backward()

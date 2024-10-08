@@ -62,7 +62,7 @@ def _collate_fn_causal_mask(
 
 
 def get_dataloader(
-    tokenizer, world_size: int, rank: int, seq_length: int, batch_size: int, num_workers: int, fake_data: bool
+    tokenizer, world_size: int, rank: int, seq_length: int, batch_size: int, num_workers: int, fake_data: bool, pad_token_id: int
 ) -> DataLoader:
     if fake_data:
         train_dataset = FakeTokenizedDataset(seq_length, TEST_VOCAB_SIZE)
@@ -78,7 +78,7 @@ def get_dataloader(
         )["train"]
         train_dataset = split_dataset_by_node(tokenized_datasets, world_size=world_size, rank=rank)
 
-    data_collator = collate_causal_mask(max_seq_length=seq_length, pad_id=0, ignore_index=-100)
+    data_collator = collate_causal_mask(max_seq_length=seq_length, pad_id=pad_token_id, ignore_index=-100)
 
     return StatefulDataLoader(
         train_dataset,
