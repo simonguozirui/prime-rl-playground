@@ -78,7 +78,7 @@ def get_dataloader(
         )["train"]
         train_dataset = split_dataset_by_node(tokenized_datasets, world_size=world_size, rank=rank)
 
-    data_collator = collate_causal_mask(max_seq_length=seq_length, pad_id=tokenizer.pad_token_id, ignore_index=-100)
+    data_collator = collate_causal_mask(max_seq_length=seq_length, pad_id=0, ignore_index=-100)
 
     return StatefulDataLoader(
         train_dataset,

@@ -76,7 +76,7 @@ class CkptConfig(BaseConfig):
 class Config(BaseConfig):
     # main config
     name_model: Literal["debugmodel", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
-    type_model: Literal["llama2", "llama3"] = "llama2"
+    type_model: Literal["llama2", "llama3"] = "llama3"
 
     project: str = "zeroband"
     metric_logger_type: Literal["wandb", "dummy"] = "wandb"
@@ -104,8 +104,7 @@ def train(config: Config):
             config.ckpt.interval % config.diloco.inner_steps == 0
         ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
 
-    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    tokenizer.pad_token = "</s>"  # todo(sami): remove padding tokens once we have context stuffing
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True) # , add_eos_token=False, add_bos_token=False)
 
     logger.debug("tokenizer loaded")
 
@@ -122,7 +121,7 @@ def train(config: Config):
     model, model_config = get_model(
         config.name_model,
         config.type_model,
-        vocab_size=tokenizer.vocab_size
+        vocab_size=len(tokenizer)
         if config.name_model != "debugmodel" or not config.data.fake
         else TEST_VOCAB_SIZE,
         seq_length=config.data.seq_length,
@@ -253,7 +252,7 @@ def train(config: Config):
                 flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 loss = (
-                    F.cross_entropy(flatten_logits, flatten_labels, ignore_index=tokenizer.pad_token_id)
+                    F.cross_entropy(flatten_logits, flatten_labels, ignore_index=0)
                     / gradient_accumulation_steps
                 )
                 loss.backward()
