@@ -13,8 +13,11 @@ lr = 4e-4
 
 [diloco]
 inner_steps = 50
+compression = "uint8"
 
 [ckpt]
-path = "/data/outputs_1b_diloco_50"
-interval = 1000
+interval = 50
+topk = 3
+live_recovery = true
+path = "outputs_1b_diloco_50"
 

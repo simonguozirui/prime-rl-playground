@@ -1,5 +1,5 @@
 name_model = "10B"
-project = "debug_10B_zero_band"
+project = "10B_zero_band"
 
 [train]
 micro_bs = 1
@@ -24,4 +24,8 @@ dataset_ratio = "55:10:20:10:5"
 inner_steps = 100
 compression = "uint8"
 
-
+[ckpt]
+interval = 100
+topk = 3
+live_recovery = true
+path = "outputs_10B_zero_band"
