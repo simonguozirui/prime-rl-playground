@@ -86,6 +86,11 @@ def test_all_reduce_diloco(backend: Compression):
     _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value])
 
 
+def test_z_loss():
+    num_gpus = [1, 1]
+    _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=["--optim.z_loss"])
+
+
 @pytest.mark.parametrize("packing", [True, False])
 def test_packing(packing: bool):
     num_gpus = [2, 1]
