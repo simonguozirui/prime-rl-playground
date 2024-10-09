@@ -305,7 +305,8 @@ class CkptManager:
             # if we are in self recovery mode the ckpt is already in shm and we just copy
             if self.world_info.local_rank == 0:
                 self._async_save_remote(self.shm_path, step_ckpt_path)
-                self._async_save_remote(self.shm_path, remote_ckpt_path)
+                if self.config.remote_path is not None:
+                    self._async_save_remote(self.shm_path, remote_ckpt_path)
 
         if self.world_info.local_rank == 0:
             if self.config.topk is not None:
