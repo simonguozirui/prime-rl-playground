@@ -1,5 +1,5 @@
-from functools import partial
-from typing import Any, Generator, Optional, List, Dict, Union
+import random
+from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 from pydantic_config import BaseConfig
 from zeroband.utils.logging import get_logger
 
@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset, Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
+from torch.distributed.checkpoint.stateful import Stateful
 
 from datasets import load_dataset, interleave_datasets, load_dataset_builder, BuilderConfig
 from datasets.distributed import split_dataset_by_node
@@ -43,45 +44,94 @@ class FakeTokenizedDataset(IterableDataset):
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
         while True:
-            input_ids = torch.randint(3, self.vocab_size, (self.seq_len,)).tolist()
+            len_ = random.randint(1, self.seq_len)
+            input_ids = torch.randint(3, self.vocab_size, (len_,)).tolist()
             yield {"input_ids": input_ids}
 
 
-def collate_causal_mask(max_seq_length: int = -1, pad_id: int = 0, ignore_index: int = -100) -> callable:
-    """collate function for causal mask. Fill with padding tokens if sequence is shorter than max_seq_length"""
-    return partial(_collate_fn_causal_mask, max_seq_length=max_seq_length, pad_id=pad_id, ignore_index=ignore_index)
+class BatchOutput(TypedDict):
+    input_ids: torch.IntTensor
+    labels: torch.IntTensor
+    seqlens: list[int]
 
 
-def _collate_fn_causal_mask(
-    samples: list[dict[str, torch.LongTensor]], max_seq_length: int = -1, pad_id: int = 0, ignore_index: int = -100
-) -> dict[str, torch.LongTensor]:
-    """collate function for causal mask. Fill with padding tokens if sequence is shorter than max_seq_length.
-    input_ids and labels are both of size max_seq_length.
+class SequencePackingDataSet(IterableDataset, Stateful):
+    """
+    This class wrap a dataset and wrap it into an iterable that return sequence of max_seq_length
+    packed
     """
 
-    assert samples[0].keys() == {"input_ids"}
+    def __init__(self, dataset: Dataset, max_seq_length: int, eos_token: int):
+        self.dataset = dataset
+        self.max_seq_length = max_seq_length
+        self.eos_token = eos_token
 
-    batched = {"input_ids": [], "labels": []}
+    def __iter__(self) -> Generator[BatchOutput, Any, None]:
+        inputs_ids = []
+        labels = []
+        seqlens = []
 
-    if max_seq_length > 0:
-        max_seq_length += 1  # this makes sure that the effective seqlen is correct
+        for og_sample in self.dataset:
+            og_sample: list[int] = og_sample["input_ids"]
+
+            og_sample = og_sample + [self.eos_token]
+            sample_inputs_ids = og_sample[:-1]
+            sample_labels = og_sample[1:]
+
+            token_remaining = self.max_seq_length - len(inputs_ids)
+
+            if len(sample_inputs_ids) < token_remaining:
+                inputs_ids.extend(sample_inputs_ids)
+                labels.extend(sample_labels)
+                seqlens.append(len(sample_inputs_ids))
+
+            else:
+                inputs_ids.extend(sample_inputs_ids[:token_remaining])
+                labels.extend(sample_labels[:token_remaining])
+                seqlens.append(token_remaining)
+
+                yield {
+                    "input_ids": torch.Tensor(inputs_ids).to(dtype=torch.long),
+                    "labels": torch.Tensor(labels).to(dtype=torch.long),
+                    "seqlens": seqlens,
+                }
+                inputs_ids = []
+                labels = []
+                seqlens = []
+
+    def state_dict(self):
+        return self.dataset.state_dict()
+
+    def load_state_dict(self, state_dict):
+        self.dataset.load_state_dict(state_dict)
+
+
+def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.LongTensor]:
+    assert samples[0].keys() == {"input_ids", "labels", "seqlens"}
+
+    inputs_ids = []
+    labels = []
+    seqlens = []
 
     for sample in samples:
-        input_ids = torch.Tensor(sample["input_ids"]).long()
+        inputs_ids.append(sample["input_ids"])
+        labels.append(sample["labels"])
 
-        if len(input_ids) < max_seq_length:
-            input_ids = torch.cat([input_ids, torch.full((max_seq_length - len(input_ids),), pad_id)])
-        elif len(input_ids) > max_seq_length:
-            input_ids = input_ids[:max_seq_length]
+        seqlens.extend(sample["seqlens"])
 
-        batched["input_ids"].append(input_ids[:-1])
-        batched["labels"].append(input_ids[1:])
-
-    return {"input_ids": torch.stack(batched["input_ids"], dim=0), "labels": torch.stack(batched["labels"], dim=0)}
+    return {
+        "input_ids": torch.stack(inputs_ids, dim=0),
+        "labels": torch.stack(labels, dim=0),
+        "seqlens": torch.Tensor(seqlens).long(),
+    }
 
 
 def get_dataloader(
-    tokenizer, world_size: int, rank: int, batch_size: int, data_config: DataConfig, pad_token_id: int
+    tokenizer,
+    world_size: int,
+    rank: int,
+    batch_size: int,
+    data_config: DataConfig,
 ) -> DataLoader:
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
@@ -95,12 +145,12 @@ def get_dataloader(
         tokenized_datasets = ds.map(tokenize_function, batched=True, remove_columns=["text", "attention_mask"])
         train_dataset = split_dataset_by_node(tokenized_datasets, world_size=world_size, rank=rank)
 
-    data_collator = collate_causal_mask(max_seq_length=data_config.seq_length, pad_id=pad_token_id, ignore_index=-100)
+    dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
 
     return StatefulDataLoader(
-        train_dataset,
-        collate_fn=data_collator,
+        dataset,
         batch_size=batch_size,
+        collate_fn=collate_fn,
         num_workers=data_config.num_workers,
     )
 
