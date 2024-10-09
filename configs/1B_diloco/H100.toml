@@ -10,6 +10,8 @@ warmup_steps = 1000
 total_steps = 88_000
 lr = 4e-4
 
+z_loss = true
+
 
 [diloco]
 inner_steps = 50
