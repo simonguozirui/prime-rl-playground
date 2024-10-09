@@ -48,6 +48,12 @@ class FakeTokenizedDataset(IterableDataset):
             input_ids = torch.randint(3, self.vocab_size, (len_,)).tolist()
             yield {"input_ids": input_ids}
 
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
 
 class BatchOutput(TypedDict):
     input_ids: torch.IntTensor
