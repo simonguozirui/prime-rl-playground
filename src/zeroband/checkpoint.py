@@ -243,12 +243,15 @@ class CkptManager:
 
         if not already_in_shm:
             self._save(step_ckpt_path)
-            if remote_ckpt_path is not None:
-                self._async_save_remote(step_ckpt_path, remote_ckpt_path)
-            self._logger.info(f"Saved checkpoint to {ckpt_path} in {time.perf_counter() - time_start} seconds")
+
+            if self.world_info.local_rank == 0:
+                if remote_ckpt_path is not None:
+                    self._async_save_remote(step_ckpt_path, remote_ckpt_path)
+                self._logger.info(f"Saved checkpoint to {ckpt_path} in {time.perf_counter() - time_start} seconds")
 
         else:
-            self._async_save_remote(self.shm_path, step_ckpt_path, remote_ckpt_path)
+            if self.world_info.local_rank == 0:
+                self._async_save_remote(self.shm_path, step_ckpt_path, remote_ckpt_path)
 
     def _save(self, ckpt_path: str):
         if self.diloco_offloaded_optimizer:
