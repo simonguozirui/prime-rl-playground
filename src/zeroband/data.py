@@ -163,7 +163,7 @@ def _get_ds_config_dict(path: str, name: Optional[str] = None) -> Dict[str, Buil
 
 def _get_datafiles(path: str, name: Optional[str] = None, split: str = "train") -> List[str]:
     builder_config = _get_ds_config_dict(path=path, name=name)
-    if name is None:
+    if name is None or len(name) == 0:
         if "default" not in builder_config:
             logger.warning(f"Default config not found for {path}. Using first config.")
             name = next(iter(builder_config.keys()))
