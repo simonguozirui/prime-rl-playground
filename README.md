@@ -1,6 +1,8 @@
 # Prime - Decentralized Training At Scale
 Prime (previously called ZeroBand) is a framework for efficient, globally distributed training of AI models over the internet.
 
+https://github.com/user-attachments/assets/c034d2a2-400c-4bf8-acd0-c84b6c897d69
+
 ## Key Features
 - **Fault Tolerant Training** with Dynamic On-/Off Ramping of Workers. Prime introduces the `ElasticDeviceMesh` concept, which provides:
     - Dynamic global process groups for communication via the internet
