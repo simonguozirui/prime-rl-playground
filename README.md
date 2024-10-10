@@ -18,7 +18,7 @@ Prime (previously called ZeroBand) is a framework for efficient, globally distri
     - Our DiLoCo optimizers are shared allowing us to open multiple connections at the same time and maximising bandwidth utilization
 - FSDP2 based
 
-A research paper explaining the Prime framework  
+A research paper explaining the Prime framework is coming soon.
 
 ## Getting Started
 
