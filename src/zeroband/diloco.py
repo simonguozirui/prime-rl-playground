@@ -100,6 +100,7 @@ class Diloco:
             try:
                 self.offloaded_grad_flat_tensor.div_(global_pg.size())
                 _collective_start_time = time.time()
+
                 self._logger.debug("Beginning all reduce")
                 # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
                 for tensor_group in self._offloaded_grad_grouped_tensor:

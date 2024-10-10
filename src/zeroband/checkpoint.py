@@ -138,12 +138,17 @@ class OuterOptimizerWrapper(Stateful):
         self.optimizer.load_state_dict(state_dict)
 
 
+class RemoteConfig(BaseConfig):
+    path: str  # could be a s3 path
+    interval: int
+
+
 class CkptConfig(BaseConfig):
     path: str | None = None
     interval: int | None = None
     topk: int | None = None
 
-    remote_path: str | None = None  # could be a s3 path
+    remote: RemoteConfig | None = None
 
     resume: str | None = None
 
@@ -156,7 +161,7 @@ class CkptConfig(BaseConfig):
     def validate_path_and_interval(self):
         if (self.path is None) != (self.interval is None):
             raise ValueError("path and interval must be bpth set or both None")
-        if self.path is None and self.remote_path is not None:
+        if self.path is None and self.remote is not None:
             raise ValueError("remote_path is set but path is not set")
 
         return self
@@ -210,7 +215,7 @@ class CkptManager:
         self._logger = get_logger()
         self.world_info = get_world_info()
 
-        self.async_save_process: list[multiprocessing.Process] = []
+        self.blocking_process: list[multiprocessing.Process] = []
 
         if self.config.live_recovery:
             self.shm_path = os.path.join(SHM_PATH, self.world_info.global_unique_id, "latest")
@@ -226,8 +231,8 @@ class CkptManager:
             if self.config.path is not None:
                 self.check_path_access(self.config.path)
 
-            if self.config.remote_path is not None:
-                self.check_path_access(self.config.remote_path)
+            if self.config.remote is not None:
+                self.check_path_access(self.config.remote.path)
 
     def check_path_access(
         self,
@@ -278,7 +283,7 @@ class CkptManager:
             self.live_server.start_server()
         self._logger.info(f"Saved checkpoint to {ckpt_path} in {time.perf_counter() - time_start} seconds")
 
-    def save(self) -> None:
+    def save(self, remote: bool = False) -> None:
         """
         Each rank will save the right shard of the model and optimizer.
 
@@ -291,28 +296,29 @@ class CkptManager:
 
         step_ckpt_path = os.path.join(self.config.path, f"step_{self.training_progress.step}")
 
-        if self.config.remote_path is not None:
-            remote_ckpt_path = os.path.join(self.config.remote_path, f"step_{self.training_progress.step}")
+        if remote and self.config.remote is not None:
+            remote_ckpt_path = os.path.join(self.config.remote.path, f"step_{self.training_progress.step}")
 
         if not self.config.live_recovery:
             # if we are not in self recovery mode we save to disk
+            time_start = time.perf_counter()
             self._save(step_ckpt_path)
-
-            if self.world_info.local_rank == 0:
-                self._async_save_remote(step_ckpt_path, remote_ckpt_path)
+            self._logger.info(f"Saved checkpoint to {step_ckpt_path} in {time.perf_counter() - time_start} seconds")
 
         else:
             # if we are in self recovery mode the ckpt is already in shm and we just copy
             if self.world_info.local_rank == 0:
                 self._async_save_remote(self.shm_path, step_ckpt_path)
-                if self.config.remote_path is not None:
-                    self._async_save_remote(self.shm_path, remote_ckpt_path)
 
+        # push to remote
         if self.world_info.local_rank == 0:
-            if self.config.topk is not None:
-                delete_topk(self.config.path, self.config.topk)
+            if remote and self.config.remote is not None:
+                ckpt_path = self.shm_path if self.config.live_recovery else step_ckpt_path
+                self._async_save_remote(ckpt_path, remote_ckpt_path)
 
     def _save(self, ckpt_path: str):
+        self.wait_for_blocking_job()
+
         if self.diloco_offloaded_optimizer:
             # here we save model and offloaded optimizer on each diloco rank even tho they are the same
             # this is done for two reasons:
@@ -340,7 +346,7 @@ class CkptManager:
 
         gc.collect()
 
-    def _async_save_remote(self, ckpt_path: str, remote_ckpt_path: str):
+    def _async_save_remote(self, ckpt_path: str, remote_ckpt_path: str) -> None:
         """asyncronously rsync a ckpt folder to a remote location. Using fsspec to handle remote cloud storage without to install
         specific libraries (e.g. s3fs).
         """
@@ -359,21 +365,24 @@ class CkptManager:
         processes = multiprocessing.Process(target=rsync, daemon=True)
         processes.start()
 
-        self.async_save_process.append(processes)
+        self.blocking_process.append(processes)
 
-    def wait_async_save_process(self):
-        """
-        wait for all async save process to finish
-        """
-        for process in self.async_save_process:
+    def wait_for_blocking_job(self):
+        for process in self.blocking_process:
             process.join()
+
+        self.blocking_process = []
+
+        if self.world_info.local_rank == 0:
+            if self.config.topk is not None:
+                delete_topk(self.config.path, self.config.topk)
 
     def _del__(self):
         if self.live_server is not None:
             shutil.rmtree(self.shm_path, ignore_errors=True)
             self.live_server.stop()
 
-        self.wait_async_save_process()
+        self.wait_for_blocking_job()
 
     def load(self, resume_ckpt_path: str, diloco_rank: int | None = None, skip_dataloader: bool = False) -> None:
         """
