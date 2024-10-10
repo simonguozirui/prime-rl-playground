@@ -1,37 +1,36 @@
-# ZeroBand
-ZeroBand is a production ready codebase for decentralized training of LLM
+# Prime - Decentralized Training At Scale
+Prime (previously called ZeroBand) is a framework for efficient, globally distributed training of AI models over the internet.
 
+## Key Features
+- **Fault Tolerant Training** with Dynamic On-/Off Ramping of Workers. Prime introduces the `ElasticDeviceMesh` concept, which provides:
+    - Dynamic global process groups for communication via the internet
+    - Fixed local process groups for distributed training inside one node / datacenter
+    - The local process groups are fixed, while the global process groups can be recreated dynamically
+    - **Heartbeat / Deathrattle mechanism:** Each node signals that it’s still online by sending a heartbeat to the global TCP store. If it dies it sends a deathrattle. If it dies before being able to send a deathrattle the node will be ejected before the outer step communication.
+    - **World Resolution:** Dynamically manages handling of joiners and leavers, remapping ranks, and triggering global process group reinitializations.
+    - **Independent TCP Stores:** Contrary to usual PyTorch distributed training we leverage multiples TCPStores. For instance, each DiLoCo node has its own TCPStore for local communication.
+- Live Checkpoint Recovery
+- Async Checkpointing
+- Custom Int8 All-Reduce Kernels
+    - Python compression is slow -> C++ 
+    - Quantize aware ring reduce
+- [DiLoCo](https://arxiv.org/abs/2311.08105) implementation
+    - Our DiLoCo optimizers are shared allowing us to open multiple connections at the same time and maximising bandwidth utilization
+- FSDP2 based
 
-## Development
+A research paper explaining the Prime framework  
 
-install uv
+## Getting Started
+
+1. Install `uv`:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.cargo/env
 ```
 
-Optionnaly create a venv
-
-```
-uv venv
-source .venv/bin/activate
-```
-
-Install deps
-```
-uv sync --extra all
-```
-downlaod submodules
-```
-git submodule update --init --recursive
-```
-
-
-copy paste to full command:
+2. Set up the environment:
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.cargo/env
 uv venv
 source .venv/bin/activate
 uv sync --extra all
@@ -39,55 +38,38 @@ uv pip install flash-attn --no-build-isolation
 git submodule update --init --recursive
 ```
 
+### Quick Check
 
-run your code using 
-
-```bash
-uv run ...
-```
-
-## Quick check
-
-To check that everything is working you can do
+Verify your setup:
 
 ```bash
 ZERO_BAND_LOG_LEVEL=DEBUG torchrun --nproc_per_node=2 src/zeroband/train.py @configs/debug/normal.toml
 ```
 
-## Run diloco
+## Usage
 
-To run diloco locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh` 
+### Running DiLoCo
 
-:note: you need 4 gpus to run the following command
+To test DiLoCo locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh` 
 
 ```bash
+# Using 4 GPUs
 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 2 src/zeroband/train.py @configs/debug/diloco.toml
-```
 
-if you have only two gpus
-
-```bash
+# Using 2 GPUs
 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 src/zeroband/train.py @configs/debug/diloco.toml
 ```
 
-One gpu is not supported at the moment because of a fsdp bug in our implementation.
+> **Note:** Single GPU setups are currently not supported due to an FSDP implementation bug.
 
-## run test
+### Running Tests
 
-You need a machine with a least two gpus to run the full test suite.
-
-Some test must be run from the root directory.
+Ensure you have at least two GPU to run the full test suite:
 ```bash
 uv run pytest
 ```
 
-## Potential foot gun to avoid:
-
-if you have a datasets error at the beginning of training try to use the following env var
-```
-HF_HUB_ETAG_TIMEOUT=500
-```
-## On off ramping routines
+### On/Off Ramping Routines
 - For the first initialisation, all the GLOBAL env vars matter and will be used by the nodes to initialize.
 - When nodes join, only the `GLOBAL_ADDR` and `GLOBAL_PORT` matter. You still have to set `GLOBAL_RANK` and `GLOBAL_WORLD_SIZE` but they will be updated when the global pg initializes.
 - When a node wishes to offboard, it must call `edm._queue_leave()` and then `edm.maybe_reinit_global_pg()`. The mechanism is that it has to tell the master it is leaving and then join the the next `edm.maybe_reinit_global_pg()` in order to not deadlock the barrier for master's `_resolve_world()`. Jackmin is trying to change this behavior such that the leaving node can leave without having to `edm.maybe_reinit_global_pg()` or without `edm._queue_leave()` but they are required for now.
@@ -112,3 +94,11 @@ HF_HUB_ETAG_TIMEOUT=500
 | `ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS` | Time in seconds after which a node is considered dead if no heartbeat is received | `10` |
 | `ZERO_BAND_LIVE_RECO_PORT` | Port number for the live recovery server | random |  
 | `ZERO_BAND_LIVE_RECO_ADDR` | IP Address for the live recovery server | `localhost` |  
+
+## Troubleshooting
+
+If you encounter any dataset loading errors at the beginning of training, try setting:
+
+```bash
+export HF_HUB_ETAG_TIMEOUT=500
+```
