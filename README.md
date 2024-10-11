@@ -84,12 +84,6 @@ Ensure you have at least two GPU to run the full test suite:
 ```bash
 uv run pytest
 ```
-
-### On/Off Ramping Routines
-- For the first initialisation, all the GLOBAL env vars matter and will be used by the nodes to initialize.
-- When nodes join, only the `GLOBAL_ADDR` and `GLOBAL_PORT` matter. You still have to set `GLOBAL_RANK` and `GLOBAL_WORLD_SIZE` but they will be updated when the global pg initializes.
-- When a node wishes to offboard, it must call `edm._queue_leave()` and then `edm.maybe_reinit_global_pg()`. The mechanism is that it has to tell the master it is leaving and then join the the next `edm.maybe_reinit_global_pg()` in order to not deadlock the barrier for master's `_resolve_world()`. Jackmin is trying to change this behavior such that the leaving node can leave without having to `edm.maybe_reinit_global_pg()` or without `edm._queue_leave()` but they are required for now.
-
 ## Environment variables
 ### Global Store Initialization
 | Environment Variable  | Description                                      | Default Value |
