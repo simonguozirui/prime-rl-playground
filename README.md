@@ -1,37 +1,52 @@
-# ZeroBand
-ZeroBand is a production ready codebase for decentralized training of LLM
+# prime - decentralized training at scale
+prime (previously called ZeroBand) is a framework for efficient, globally distributed training of AI models over the internet.
 
+https://github.com/user-attachments/assets/c034d2a2-400c-4bf8-acd0-c84b6c897d69
 
-## Development
+## Key Features
 
-install uv
+- **`ElasticDeviceMesh` for Fault Tolerant Training:**
+    - In Prime, we’ve added a new distributed abstraction called `ElasticDeviceMesh` which encapsulates dynamic global process groups for fault-tolerant communication across the internet and local process groups for communication within a node or datacenter.
+    - The `ElasticDeviceMesh` manages the resizing of the global process groups when nodes join or leave, unlike the standard `DeviceMesh` in torch distributed, which will crash and require a cold restart to resize the process group.
+    - In order to know when to resize the process groups, we use a heartbeat mechanism to discover dead nodes and remove them from the process group. Crashing nodes will attempt a best effort deathrattle to fail their own heartbeat quickly, saving its comrades the timeout.
+- **Asynchronous distributed checkpointing**
+    - Due to the size of the model, checkpointing can be an expensive operation, taking up to 20 minutes on the nodes we tested. This would reduce our compute utilisation if it blocked the main training process.
+    - In order to minimize the blocking time, we first checkpoint into `/dev/shm` which is a RAM backed filesystem. This operation is much faster and we can unblock the main training process once the checkpoint has been created in `/dev/shm`.
+    - We then use two subprocesses to asynchronously copy the checkpoint out of `/dev/shm` into the checkpoint directory on disk as well as upload it to the remote.
+- **Live checkpoint recovery**
+    - Nodes that wish to join the run mid-training need to be able to get the most recent state of the model and optimiser before being able to contribute to the training. They must complete this operation in the time window between two outer steps, otherwise, the checkpoint they receive would be stale.
+    - In order to do this quickly, we have the joining nodes request the checkpoints from its peers which all host a sidecar HTTP server serving the latest checkpoint out of `/dev/shm`.
+    - Once the joining node has downloaded and initialized the model, it skips the inner steps and joins the outer step with zero pseudo-gradients. This is to prevent the joining node from stalling the existing nodes. If the joining node also performed the inner steps, it would be late to the outer step by the time it took to download and load the checkpoint, reducing the clusters compute utilisation.
+- **Custom Int8 All-Reduce Kernel**
+    - In our experiments, we found that we are able to perform int8 quantization on the pseudo gradients without any impact on the loss curves. This means that we can reduce the payload size of each outer step all-reduce by 4x if we communicate the pseudo-gradients in int8 instead of fp32.
+    - However, we need to accumulate the reduce in fp32, dequantizing and re-quantizing intermediate results during the all-reduce. This is not supported by any collective communication libraries.
+    - We thus implemented our own fully pipelined ring-reduce kernel in C++ which is JIT compiled as a custom operator using the torch library.
+    - However, with the amount of quantization work we needed to perform, using the torch ops (`quantize_per_tensor`, `scatter_add`, `index`, etc) was too slow, resulting in underutilisation of our target network bandwidth of 4 Gbps.
+    - We thus implemented our own multithreaded uint8 ops in C++  to perform the quantization and dequantization operations, improving the quantization speed by more than 60x.
+- **Maximising bandwidth utilization:**
+    - By sharding our DiLoCo pseudo-gradients in a node, we can maximise network bandwidth utilization by opening multiple connections at the same time when performing the all-reduce. This yielded a transfer speed improvement of 8x on some nodes.
+    - Relying on the public IP forward resulted in poor or unstable p2p bandwidth on some compute providers. To mitigate this, we employ VPN technology to optimize peer-to-peer connections between nodes, allowing us to better utilize the available internet bandwidth between nodes by modifying the routing of packets through the internet.
+    - We’ve improved bandwidth utilization between nodes in similar data center settings by up to 40x compared to our OpenDiLoCo release, achieving up to 4Gb/s connections between data centers across the whole United States.
+- **PyTorch FSDP2 / DTensor ZeRO-3 implementation**
+    - In order to fit the 10B model training within our given memory resources, we had to do shard the model weights, gradients and optimizer states between intra-node GPUs.
+    - We achieved this using the `fully_shard` API from PyTorch FSDP2 which wraps the model parameters as `DTensor`s and registers hooks to schedule all-gather and reduce-scatter on the tensors when they are used. FSDP2 also optimizes the collectives by bucketing the parameters into `FSDPParamGroup`s. This allows us to execute the collectives on larger tensors, improving protocol-to-payload ratio and improving the overlap from pipelining. We employ the same trick for our pseudo-gradients, bucketing them by layer.
+- **CPU Off-Loading**
+    - Our Diloco optimizer does not add any GPU overhead. All the tensors required by the Diloco optimizer are offloaded to CPU memory.
+    - Since we only perform a global sync every hundreds of steps, the reduced speed of copying and calculating the pseudo-gradient on cpu is negligible relative to the time to execute the inner steps and all-reduce.
+
+A research paper about the framework and our INTELLECT-1 10B experiment is coming soon.
+
+## Getting Started
+
+1. Install `uv`:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.cargo/env
 ```
 
-Optionnaly create a venv
-
-```
-uv venv
-source .venv/bin/activate
-```
-
-Install deps
-```
-uv sync --extra all
-```
-downlaod submodules
-```
-git submodule update --init --recursive
-```
-
-
-copy paste to full command:
+2. Set up the environment:
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.cargo/env
 uv venv
 source .venv/bin/activate
 uv sync --extra all
@@ -39,55 +54,38 @@ uv pip install flash-attn --no-build-isolation
 git submodule update --init --recursive
 ```
 
+### Quick Check
 
-run your code using 
-
-```bash
-uv run ...
-```
-
-## Quick check
-
-To check that everything is working you can do
+Verify your setup:
 
 ```bash
 ZERO_BAND_LOG_LEVEL=DEBUG torchrun --nproc_per_node=2 src/zeroband/train.py @configs/debug/normal.toml
 ```
 
-## Run diloco
+## Usage
 
-To run diloco locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh` 
+### Running DiLoCo
 
-:note: you need 4 gpus to run the following command
+To test DiLoCo locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh` 
 
 ```bash
+# Using 4 GPUs
 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 2 src/zeroband/train.py @configs/debug/diloco.toml
-```
 
-if you have only two gpus
-
-```bash
+# Using 2 GPUs
 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 src/zeroband/train.py @configs/debug/diloco.toml
 ```
 
-One gpu is not supported at the moment because of a fsdp bug in our implementation.
+> **Note:** Single GPU setups are currently not supported due to an FSDP implementation bug.
 
-## run test
+### Running Tests
 
-You need a machine with a least two gpus to run the full test suite.
-
-Some test must be run from the root directory.
+Ensure you have at least two GPU to run the full test suite:
 ```bash
 uv run pytest
 ```
 
-## Potential foot gun to avoid:
-
-if you have a datasets error at the beginning of training try to use the following env var
-```
-HF_HUB_ETAG_TIMEOUT=500
-```
-## On off ramping routines
+### On/Off Ramping Routines
 - For the first initialisation, all the GLOBAL env vars matter and will be used by the nodes to initialize.
 - When nodes join, only the `GLOBAL_ADDR` and `GLOBAL_PORT` matter. You still have to set `GLOBAL_RANK` and `GLOBAL_WORLD_SIZE` but they will be updated when the global pg initializes.
 - When a node wishes to offboard, it must call `edm._queue_leave()` and then `edm.maybe_reinit_global_pg()`. The mechanism is that it has to tell the master it is leaving and then join the the next `edm.maybe_reinit_global_pg()` in order to not deadlock the barrier for master's `_resolve_world()`. Jackmin is trying to change this behavior such that the leaving node can leave without having to `edm.maybe_reinit_global_pg()` or without `edm._queue_leave()` but they are required for now.
@@ -112,3 +110,11 @@ HF_HUB_ETAG_TIMEOUT=500
 | `ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS` | Time in seconds after which a node is considered dead if no heartbeat is received | `10` |
 | `ZERO_BAND_LIVE_RECO_PORT` | Port number for the live recovery server | random |  
 | `ZERO_BAND_LIVE_RECO_ADDR` | IP Address for the live recovery server | `localhost` |  
+
+## Troubleshooting
+
+If you encounter any dataset loading errors at the beginning of training, try setting:
+
+```bash
+export HF_HUB_ETAG_TIMEOUT=500
+```

@@ -160,7 +160,7 @@ class CkptConfig(BaseConfig):
     @model_validator(mode="after")
     def validate_path_and_interval(self):
         if (self.path is None) != (self.interval is None):
-            raise ValueError("path and interval must be bpth set or both None")
+            raise ValueError("path and interval must be both set or both None")
         if self.path is None and self.remote is not None:
             raise ValueError("remote_path is set but path is not set")
 

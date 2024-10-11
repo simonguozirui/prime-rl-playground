@@ -388,9 +388,9 @@ class ElasticDeviceMesh:
 
 class LiveRecovery:
     """
-    Each Node expose an http server saving the lastest ckpt.
-    Each adress serving a ckpt is save in the store.
-    When a new node is joinings it retrieve the adress fron the store and downloading the latest ckpk.
+    Each Node exposes an http server saving the lastest ckpt.
+    Each adress serving a ckpt is saved in the store.
+    When a new node is joinings it retrieves the adress from the store and downloads the latest ckpt.
     """
 
     def __init__(self, enable: bool):
