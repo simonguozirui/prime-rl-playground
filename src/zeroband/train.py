@@ -242,7 +242,11 @@ def train(config: Config):
 
     if config.ckpt.resume is not None:
         # all is inplace
-        ckpt_manager.load(resume_ckpt_path=config.ckpt.resume, skip_dataloader=config.ckpt.load_dataloader)
+        ckpt_manager.load(
+            resume_ckpt_path=config.ckpt.resume,
+            skip_dataloader=config.ckpt.skip_dataloader,
+            data_path=config.ckpt.data_path,
+        )
         if config.train.log_model_hash:
             logger.info(f"model hash: {get_module_signature(model)}")
             logger.info(f"optimizer hash: {get_optimizer_signature(inner_optimizer)}")
