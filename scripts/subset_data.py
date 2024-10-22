@@ -115,6 +115,6 @@ if __name__ == "__main__":
     parser.add_argument("--data_rank", type=int, default=0, help="start index")
     parser.add_argument("--data_world_size", type=int, default=4, help="world size")
     parser.add_argument("--max_shards", type=int, default=1000)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=12)
     args = parser.parse_args()
     main(args)
