@@ -1,6 +1,6 @@
 name_model = "10B"
 project = "10B_zero_band"
-wandb_resume = true
+wandb_resume = false
 
 [train]
 micro_bs = 1
