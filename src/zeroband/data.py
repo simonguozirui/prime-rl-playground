@@ -369,7 +369,7 @@ def _load_datasets(
     logger.debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
     datasets = []
     for ds_arg in ds_args:
-        logger.debug(f"Loading dataset: {ds_arg['data_files']}")
+        # logger.debug(f"Loading dataset: {ds_arg['data_files']}")
         _ds = ParquetDataset(files=ds_arg["data_files"], tokenizer=tokenizer)
         datasets.append(_ds)
 
