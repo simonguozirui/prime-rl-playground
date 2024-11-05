@@ -1,5 +1,8 @@
+from dataclasses import dataclass, asdict
 import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
+import functools
+
 from pydantic_config import BaseConfig
 from zeroband.utils.logging import get_logger
 
@@ -9,9 +12,10 @@ from torch.utils.data import IterableDataset, Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful
 
-from datasets import load_dataset, interleave_datasets, load_dataset_builder, BuilderConfig
-from datasets.distributed import split_dataset_by_node
-import functools
+from datasets import load_dataset_builder, BuilderConfig
+from pyarrow import parquet as pq
+from transformers import PreTrainedTokenizer
+
 
 TEST_VOCAB_SIZE = 1024
 
@@ -21,12 +25,11 @@ logger = get_logger(__name__)
 
 
 class DataConfig(BaseConfig):
-    dataset_name_or_paths: str = "allenai/c4:en"
+    dataset_name_or_paths: str = "/data/datasets/fineweb-edu"
     val_dataset_name_or_paths: Optional[str] = None
     seq_length: int = 1024
     fake: bool = False
     num_workers: int = 4
-    streaming: bool = True
     max_train_samples: Optional[int] = None
     max_eval_samples: Optional[int] = None
     dataset_ratio: Optional[str] = None
@@ -62,6 +65,13 @@ class BatchOutput(TypedDict):
     seqlens: list[int]
 
 
+@dataclass
+class SequencePackingDataSetState:
+    inputs_ids: list[int]
+    labels: list[int]
+    seqlens: list[int]
+
+
 class SequencePackingDataSet(IterableDataset, Stateful):
     """
     This class wrap a dataset and wrap it into an iterable that return sequence of max_seq_length
@@ -73,11 +83,9 @@ class SequencePackingDataSet(IterableDataset, Stateful):
         self.max_seq_length = max_seq_length
         self.eos_token = eos_token
 
-    def __iter__(self) -> Generator[BatchOutput, Any, None]:
-        inputs_ids = []
-        labels = []
-        seqlens = []
+        self.state = SequencePackingDataSetState(inputs_ids=[], labels=[], seqlens=[])
 
+    def __iter__(self) -> Generator[BatchOutput, Any, None]:
         for og_sample in self.dataset:
             og_sample: list[int] = og_sample["input_ids"]
 
@@ -85,32 +93,35 @@ class SequencePackingDataSet(IterableDataset, Stateful):
             sample_inputs_ids = og_sample[:-1]
             sample_labels = og_sample[1:]
 
-            token_remaining = self.max_seq_length - len(inputs_ids)
+            token_remaining = self.max_seq_length - len(self.state.inputs_ids)
 
             if len(sample_inputs_ids) < token_remaining:
-                inputs_ids.extend(sample_inputs_ids)
-                labels.extend(sample_labels)
-                seqlens.append(len(sample_inputs_ids))
+                self.state.inputs_ids.extend(sample_inputs_ids)
+                self.state.labels.extend(sample_labels)
+                self.state.seqlens.append(len(sample_inputs_ids))
 
             else:
-                inputs_ids.extend(sample_inputs_ids[:token_remaining])
-                labels.extend(sample_labels[:token_remaining])
-                seqlens.append(token_remaining)
+                self.state.inputs_ids.extend(sample_inputs_ids[:token_remaining])
+                self.state.labels.extend(sample_labels[:token_remaining])
+                self.state.seqlens.append(token_remaining)
 
-                yield {
-                    "input_ids": torch.Tensor(inputs_ids).to(dtype=torch.long),
-                    "labels": torch.Tensor(labels).to(dtype=torch.long),
-                    "seqlens": seqlens,
+                data = {
+                    "input_ids": torch.Tensor(self.state.inputs_ids).to(dtype=torch.long),
+                    "labels": torch.Tensor(self.state.labels).to(dtype=torch.long),
+                    "seqlens": self.state.seqlens,
                 }
-                inputs_ids = []
-                labels = []
-                seqlens = []
+                self.state.inputs_ids = []
+                self.state.labels = []
+                self.state.seqlens = []
+
+                yield data
 
     def state_dict(self):
-        return self.dataset.state_dict()
+        return {"dataset": self.dataset.state_dict(), "state": asdict(self.state)}
 
     def load_state_dict(self, state_dict):
-        self.dataset.load_state_dict(state_dict)
+        self.dataset.load_state_dict(state_dict["dataset"])
+        self.state = SequencePackingDataSetState(**state_dict["state"])
 
 
 def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.LongTensor]:
@@ -133,6 +144,150 @@ def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.Lo
     }
 
 
+@dataclass
+class PQDatasetState:
+    files: List[str]
+    file_index: int
+    row_index: int
+    increment: int
+    init_row_index: int
+
+
+class ParquetDataset(IterableDataset, Stateful):
+    """
+    this class is a wrapper around a parquet dataset compatible with datasets and statefull compatible. The dataset is infinite and will restart from the last state if the iterator is exhausted.
+    TODO:
+    * [ ] handle mutli proc dataloader pytorch
+    """
+
+    def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer):
+        self.arg_files = files
+        self.tokenizer = tokenizer
+
+        self.state = None
+
+    def _lazy_init(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            if worker_info.num_workers > len(self.arg_files):
+                logger.warning(
+                    f"dataloader rank {worker_info.id} Number of workers {worker_info.num_workers} is greater than the number of files {len(self.arg_files)}"
+                )
+                self.state = PQDatasetState(
+                    files=self.arg_files,
+                    file_index=0,
+                    row_index=worker_info.id,
+                    increment=worker_info.num_workers,
+                    init_row_index=worker_info.id,
+                )
+                return
+
+            files = self.arg_files[worker_info.id :: worker_info.num_workers]
+        else:
+            files = self.arg_files
+
+        self.state = PQDatasetState(files=files, file_index=0, row_index=0, increment=1, init_row_index=0)
+
+    def __iter__(self):
+        # we lazy init the parquet dataset to get the worker info from dataloader multi process
+        if self.state is None:
+            self._lazy_init()
+
+        while True:
+            file = self.state.files[self.state.file_index]
+
+            parquet_file = pq.ParquetFile(file)
+            table = parquet_file.read()["text"]
+
+            while True:
+                row = table[self.state.row_index]
+
+                self.state.row_index += self.state.increment
+                if self.state.row_index >= len(table):
+                    self.state.row_index = self.state.init_row_index
+                    self.state.file_index += 1
+                    if self.state.file_index >= len(self.state.files):  # infinite datasets
+                        self.state.file_index = 0
+
+                yield {"input_ids": self.tokenizer.encode(str(row))}
+
+    @property
+    def is_empty(self):
+        return len(self.arg_files) == 0
+
+    def state_dict(self) -> dict[str, Any]:
+        return asdict(self.state) if self.state is not None else {}
+
+    def load_state_dict(self, state_dict):
+        self.state = PQDatasetState(**state_dict)
+
+
+@dataclass
+class InterleaveDatasetState:
+    current_index: int
+    seed: int
+
+
+class InterleaveDataset(IterableDataset, Stateful):
+    """This class take a list of datasets and interleave them. It is stateful and can be used with pytorch dataloader.
+
+    It draw a sample from each dataset with a probability given by the probabilities list.
+
+    The state can be saved and restored. Under the hood we just fast forward the random generator to the current position.
+    """
+
+    def __init__(self, datasets: List[ParquetDataset], probabilities: Optional[List[float]] = None, seed: int = 42):
+        assert len(datasets) > 0, "At least one dataset is required"
+        assert len(datasets) == len(probabilities), "The number of datasets and probabilities must be the same"
+
+        self.probabilities = []
+        self.datasets = []
+
+        for dataset, prob in zip(datasets, probabilities):
+            if not dataset.is_empty:
+                self.datasets.append(dataset)
+                self.probabilities.append(prob)
+            else:
+                logger.warning(f"Dataset {dataset} is empty. Skipping.")
+
+        self.state = InterleaveDatasetState(current_index=0, seed=seed)
+        self._init_random_state()
+
+    def _init_random_state(self):
+        """Initialize random generator and advance to current position"""
+        ...
+        self.random_generator = random.Random(self.state.seed)
+        # Advance the RNG to the current position
+        for _ in range(self.state.current_index):
+            self._get_dataset_to_yield_from()
+
+    def _get_dataset_to_yield_from(self) -> int:
+        return self.random_generator.choices(range(len(self.datasets)), weights=self.probabilities, k=1)[0]
+
+    def __iter__(self):
+        data_iters = [iter(dataset) for dataset in self.datasets]
+        while True:
+            dataset_to_yield_from = self._get_dataset_to_yield_from()
+
+            sample = next(data_iters[dataset_to_yield_from])
+            self.state.current_index += 1
+
+            yield sample
+
+    def state_dict(self):
+        state = {"interleave_state": asdict(self.state)}
+
+        for i, dataset in enumerate(self.datasets):
+            state[f"dataset_{i}"] = dataset.state_dict()
+        return state
+
+    def load_state_dict(self, state_dict):
+        self.state = InterleaveDatasetState(**state_dict["interleave_state"])
+        for i, dataset in enumerate(self.datasets):
+            dataset.load_state_dict(state_dict[f"dataset_{i}"])
+        self._init_random_state()
+
+
 def get_dataloader(
     tokenizer,
     world_size: int,
@@ -143,14 +298,9 @@ def get_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:
-        ds = load_all_datasets(data_config=data_config, split="train")
-
-        def tokenize_function(data):
-            outputs = tokenizer(data["text"], truncation=True, max_length=data_config.seq_length)
-            return outputs
-
-        tokenized_datasets = ds.map(tokenize_function, batched=True, remove_columns=["text", "attention_mask"])
-        train_dataset = split_dataset_by_node(tokenized_datasets, world_size=world_size, rank=rank)
+        train_dataset = load_all_datasets(
+            data_config=data_config, split="train", tokenizer=tokenizer, rank=rank, world_size=world_size
+        )
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
 
@@ -191,12 +341,13 @@ def _nice_print(kwargs: Dict[str, Union[str, List[str]]]) -> str:
 def _load_datasets(
     dataset_names: str,
     split: str,
+    tokenizer: PreTrainedTokenizer,
     data_rank: Optional[int] = None,
     data_world_size: Optional[int] = None,
     streaming: bool = True,
     probabilities: Optional[List[float]] = None,
     reverse_data_files: bool = False,
-) -> Dataset:
+) -> InterleaveDataset:
     logger.debug(dataset_names)
     ds_args = []
     for _ds in dataset_names.split(","):
@@ -210,6 +361,7 @@ def _load_datasets(
             _ds_args["data_files"] = _data_files
         if data_rank is not None and data_world_size is not None:
             _ds_args["data_files"] = _data_files[data_rank::data_world_size]
+
         ds_args.append(_ds_args)
 
     # logger.debug(f"Datasets ({split}):\n" + "\n".join(map(_nice_print, ds_args)))
@@ -217,13 +369,12 @@ def _load_datasets(
     logger.debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
     datasets = []
     for ds_arg in ds_args:
-        # logger.debug(f"Loading dataset: {ds_arg}")
-        _ds = load_dataset(**ds_arg, split=split, streaming=streaming)
-        _ds = _ds.remove_columns([i for i in _ds.column_names if i not in ["text"]])
+        logger.debug(f"Loading dataset: {ds_arg['data_files']}")
+        _ds = ParquetDataset(files=ds_arg["data_files"], tokenizer=tokenizer)
         datasets.append(_ds)
-        # logger.debug(f"Loaded dataset: {ds_arg}")
 
-    ds = interleave_datasets(datasets=datasets, probabilities=probabilities, stopping_strategy="all_exhausted")
+    ds = InterleaveDataset(datasets=datasets, probabilities=probabilities)
+
     logger.info(f"Loaded datasets ({split})")
     return ds
 
@@ -238,22 +389,20 @@ def _get_probabilities(data_config: DataConfig) -> Optional[List[float]]:
     return [i / denom for i in nums]
 
 
-def load_all_datasets(data_config: DataConfig, split: str, max_samples: Optional[int] = None) -> IterableDataset:
+def load_all_datasets(
+    data_config: DataConfig, split: str, tokenizer: PreTrainedTokenizer, rank: int, world_size: int
+) -> InterleaveDataset:
     """Load all datasets and interleave them"""
-    if max_samples is not None and not data_config.streaming:
-        split = f"{split}[:{max_samples}]"
     ds = _load_datasets(
         dataset_names=data_config.dataset_name_or_paths,
         split=split,
-        data_rank=data_config.data_rank,
-        data_world_size=data_config.data_world_size,
-        streaming=data_config.streaming,
+        data_rank=rank,
+        data_world_size=world_size,
         probabilities=_get_probabilities(data_config),
         reverse_data_files=data_config.reverse_data_files,
+        tokenizer=tokenizer,
     )
-    if max_samples is not None and data_config.streaming:
-        if data_config.max_train_samples is not None:
-            ds = ds.take(data_config.max_train_samples)
+
     logger.info(f"Train dataset:\n{ds}")
 
     return ds
