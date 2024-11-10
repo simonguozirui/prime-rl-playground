@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import subprocess
 from torch.distributed.device_mesh import init_device_mesh
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
@@ -10,6 +11,8 @@ from typing import List, Tuple, Optional
 from torch.testing._internal.distributed.fake_pg import FakeProcessGroup
 import multiprocessing as mp
 from uuid import uuid4
+import toposolve
+from zeroband.utils.ip import parse_iperf_output
 
 TCPSTORE_TIMEOUT = timedelta(seconds=int(os.getenv("ZERO_BAND_GLOBAL_STORE_TIMEOUT_SECONDS", "300")))
 TCPSTORE_POLLING_INTERVAL = float(os.getenv("ZERO_BAND_GLOBAL_STORE_POLLING_INTERVAL_SECONDS", "0.1"))
@@ -21,6 +24,9 @@ HEARTBEAT_INTERVAL = int(
 HEARTBEAT_TIMEOUT = int(
     os.getenv("ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS", "10")
 )  # Time in seconds after which a node is considered dead if no heartbeat is received
+IPERF_PORT = int(os.getenv("ZERO_BAND_IPERF_PORT", "10101"))
+IPERF_IFNAME = os.getenv("GLOO_SOCKET_IFNAME", "eth0")
+BENCH_TENSOR_SIZE = 1_000_000
 
 
 class ElasticDeviceMesh:
@@ -35,7 +41,6 @@ class ElasticDeviceMesh:
     - world_size: The current world size
     - mesh_count: The version of the mesh
     - rank_{uuid}: The rank of the node with the given uuid
-    - rank_map_{rank}: The new rank of the node with the given rank. Used to remap ranks when nodes leave.
     - joiner_{i}: The uuid of the ith joiner. Its a KV implmentation of a queue.
     """
 
@@ -69,21 +74,118 @@ class ElasticDeviceMesh:
         self.cpu_local_mesh = init_device_mesh("cpu", mesh_shape=(self.local_pg.size(),))
 
         # Logging
+        self._optimize_ring_ranks()
         self._logger.info(f"global_pg size : {self.global_pg.size()}, local_pg size: {self.local_pg.size()}")
 
     def __del__(self):
         self._stop_heartbeat()
         dist.destroy_process_group()
 
-    def _init_global_store_and_status(self):
+    def _init_global_store(self):
+        self._logger.info(
+            f"[{self.world_info.global_unique_id}](Leader: {self._global_leader}) TCPStore init: Connecting via {self.world_info.global_addr}:{self.world_info.global_port + self.world_info.rank}"
+        )
+        self.global_store = dist.TCPStore(
+            host_name=self.world_info.global_addr,
+            port=self.world_info.global_port + self.world_info.rank,
+            timeout=TCPSTORE_TIMEOUT,
+            is_master=self._global_leader,
+        )
+        self.god_store = dist.TCPStore(
+            host_name=self.world_info.global_addr,
+            port=self.world_info.global_port,
+            timeout=TCPSTORE_TIMEOUT,
+            is_master=False,
+        )
+
+    def _init_global_store_values(self):
         """Initialize the global store with mesh_count, joiner_0, and status. Also sets the global status."""
+        self._logger.debug("Initializing global store values")
+        self.global_store.set(f"gid_{self.world_info.global_rank}", self.world_info.global_unique_id)
+        self.global_store.set(f"rank_{self.world_info.global_unique_id}", str(self.world_info.global_rank))
         if self._global_leader:
             self.global_store.set("mesh_count", "0")
+            self.global_store.set("world_size", str(self.world_info.global_world_size))
             self.global_store.set("joiner_0", "null")
+            for i in range(self.world_info.global_world_size):
+                self.global_store.set(f"barrier_{i}", "null")
+            self._global_ids = [
+                self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)
+            ]
+            for i in self._global_ids:
+                for j in self._global_ids:
+                    self.global_store.set(f"ping_{i}_{j}", "1000_000_000")
             self.global_store.set("status", "init")
             self.global_status = "init"
         else:
             self.global_status = self._wait_for_status()
+            self._global_ids = [
+                self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)
+            ]
+
+    def _create_global_pg(self):
+        # Delete the old global_pg
+        if hasattr(self, "global_pg"):
+            if sys.getrefcount(self.global_pg) > 2:
+                self._logger.warning(
+                    f"Global PG refcount was {sys.getrefcount(self.global_pg)} when 2 is expected during deletion. This may cause a memory leak."
+                )
+            del self.global_pg  # TODO(jackmin): Where do we catch errors in teardown?
+            self._logger.info("Destroyed process group")
+
+        # Get new global rank and world size
+        self.world_info.global_rank = int(
+            self.global_store.get(f"rank_{self.world_info.global_unique_id}").decode("utf-8")
+        )
+        self.world_info.global_world_size = int(self.global_store.get("world_size").decode("utf-8"))
+        self.mesh_count = int(self.global_store.get("mesh_count").decode("utf-8"))
+        self._logger.debug(
+            f"New global rank: {self.world_info.global_rank}, New global world size: {self.world_info.global_world_size} New mesh count: {self.mesh_count}"
+        )
+
+        # Create prefix store
+        prefix_store = dist.PrefixStore(f"mesh_{self.mesh_count}", self.global_store)
+        self._logger.debug(f"Created prefix store with mesh_{self.mesh_count}")
+
+        # Create process group
+        self._logger.debug(
+            f"Creating global pg with {self.world_info.global_world_size} rank {self.world_info.global_rank}"
+        )
+        self.global_pg = dist.ProcessGroupGloo(
+            prefix_store, self.world_info.global_rank, self.world_info.global_world_size, GLOBAL_PG_TIMEOUT
+        )
+        self._logger.debug("Global pg created with %d peers. Timeout of %s", self.global_pg.size(), GLOBAL_PG_TIMEOUT)
+
+    def _optimize_ring_ranks(self):
+        if self.world_info.local_rank == 0:
+            self._logger.debug("Measuring bandwidths")
+            self._measure_connectivity()
+            self._logger.debug("Measuring bandwidths done")
+
+        self.local_pg.barrier().wait()
+        self.global_pg.barrier().wait()
+
+        if self._global_leader:
+            self._logger.debug("Calculating TSP")
+            pings = self.get_pings()
+            min_dist, path = toposolve.TSPSolver().solve_tsp(pings)
+            self._logger.debug(f"Min distance: {min_dist}")
+            self._logger.debug(f"Path: {path}")
+            new_gids = [self._global_ids[i] for i in path[:-1]]
+            assert set(new_gids) == set(self._global_ids)
+
+            for i, gid in enumerate(new_gids):
+                self.global_store.set(f"rank_{gid}", str(i))
+                self.global_store.set(f"gid_{i}", gid)
+            self.global_store.set("mesh_count", str(self.mesh_count + 1))
+
+        self.local_pg.barrier().wait()
+        self.global_pg.barrier().wait()
+
+        self._global_ids = [
+            self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)
+        ]
+        self._create_global_pg()
 
     def _queue_join(self):
         """Queue a node to join the mesh."""
@@ -132,65 +234,26 @@ class ElasticDeviceMesh:
         # Each rank gets its own global store with global rank 0 as the master
         time_start = time.perf_counter()
 
-        self._logger.info(
-            f"[{self.world_info.global_unique_id}] Elastic Device mesh init: Looking for peers via {self.world_info.global_addr}:{self.world_info.global_port}"
-        )
-
         self._global_leader = self.world_info.global_rank == 0
-        self._logger.info(f"[{self.world_info.global_unique_id}] Global leader: {self._global_leader}")
-        self.global_store = dist.TCPStore(
-            host_name=self.world_info.global_addr,
-            port=self.world_info.global_port + self.world_info.rank,
-            timeout=TCPSTORE_TIMEOUT,
-            is_master=self._global_leader,
-        )
-        self._logger.debug(
-            f"Global store created at {self.world_info.global_addr}:{self.world_info.global_port + self.world_info.rank}"
-        )
+        self._init_global_store()
 
         # Initialize store values
-        self._init_global_store_and_status()
+        self._init_global_store_values()
 
-        # Initialize prefix store
-        if self.global_status == "init":  # First time init path
-            self.mesh_count = 0  # TODO: privatize?
-            prefix_store = dist.PrefixStore("mesh_0", self.global_store)
-        elif self.global_status == "running":  # Join path
+        if self.global_status == "running":  # Join path
             # Ask to join and then wait for the status to be "reinit"
             self._logger.info("Waiting to join")
             self._queue_join()
             self._wait_for_status("reinit")
 
-            # Get the global rank and world size and create a new prefix store
-            self.world_info.global_rank = int(
-                self.global_store.get(f"rank_{self.world_info.global_unique_id}").decode("utf-8")
-            )
-            self.world_info.global_world_size = int(self.global_store.get("world_size").decode("utf-8"))
-            self.mesh_count = int(self.global_store.get("mesh_count").decode("utf-8"))
-            prefix_store = dist.PrefixStore(f"mesh_{self.mesh_count}", self.global_store)
-            self._logger.debug(f"Created prefix store with mesh_{self.mesh_count}")
-        else:
-            # TODO: Could be in "reinit" status. We probably just recurse until running in this case
-            raise RuntimeError(f"Unknown status {self.global_status}")
-
-        # Create process group
-        self._logger.debug(
-            f"Creating global pg with {self.world_info.global_world_size} rank {self.world_info.global_rank}"
-        )
-        self.global_pg = dist.ProcessGroupGloo(
-            prefix_store, self.world_info.global_rank, self.world_info.global_world_size, TCPSTORE_TIMEOUT
-        )
-        self._logger.debug("Global pg created with %d peers. Timeout of %s", self.global_pg.size(), GLOBAL_PG_TIMEOUT)
+        # Create global process group
+        self._create_global_pg()
 
         # Update global store values
         if self._global_leader:
             self.global_store.set("status", "running")
             self.global_store.set("resolved_time", uuid4().hex)
-            for i in range(self.world_info.global_world_size):
-                self.global_store.set(f"barrier_{i}", "null")
         self.global_status = "running"
-        self.global_store.set(f"rank_{self.world_info.global_unique_id}", str(self.world_info.global_rank))
-
         self._last_resolved_time = self.global_store.get("resolved_time").decode("utf-8")
 
         self._start_heartbeat()
@@ -199,6 +262,8 @@ class ElasticDeviceMesh:
             f"Elastic Device mesh init done with {self.global_pg.size()} peers in {time.perf_counter() - time_start} seconds"
         )
 
+        if self.world_info.local_rank == 0:
+            self._start_iperf_server()
         self._evicted_nodes = []
 
     def _start_heartbeat(self):
@@ -227,7 +292,7 @@ class ElasticDeviceMesh:
         """Send a heartbeat to the global store."""
         current_time = time.time()
         try:
-            self.global_store.set(f"heartbeat_{self.world_info.global_rank}", str(current_time))
+            self.global_store.set(f"heartbeat_{self.world_info.global_unique_id}", str(current_time))
         except Exception:
             self._logger.error("Error sending heartbeat", exc_info=True)
             pass
@@ -235,7 +300,7 @@ class ElasticDeviceMesh:
     def _send_deathrattle(self):
         """Send a deathrattle to the global store."""
         if hasattr(self, "global_store"):
-            self.global_store.set(f"heartbeat_{self.world_info.global_rank}", "-100")
+            self.global_store.set(f"heartbeat_{self.world_info.global_unique_id}", "-100")
         else:
             import warnings
 
@@ -245,20 +310,15 @@ class ElasticDeviceMesh:
         """Check heartbeats and return a list of nodes that have missed their heartbeats."""
         dead_nodes = []
         current_time = time.time()
-        for i in range(self.world_info.global_world_size):
+        for gid in self._global_ids:
             try:
-                last_heartbeat = float(self.global_store.get(f"heartbeat_{i}").decode("utf-8"))
-                self._logger.debug(f"Node {i} last heartbeat: {last_heartbeat}")
+                last_heartbeat = float(self.global_store.get(f"heartbeat_{gid}").decode("utf-8"))
+                self._logger.debug(f"Node {gid} last heartbeat: {last_heartbeat}")
                 if current_time - last_heartbeat > HEARTBEAT_TIMEOUT:
-                    dead_nodes.append(i)
-                    # TODO: This is to avoid cascading death when two maybe_reinit_global_pg
-                    # happen very close to each other. The deathrattle of the leaving node
-                    # becomes invalid after the node is removed but the node that replaces it
-                    # might not have set its heartbeat yet. The dirty value is read
-                    # and the replacing node is killed incorrectly.
-                    self.global_store.set(f"heartbeat_{i}", str(current_time))
+                    dead_nodes.append(gid)
+                    self.global_store.delete_key(f"heartbeat_{gid}")
             except dist.DistStoreError:
-                self._logger.warning(f"Node {i} has no heartbeat")
+                self._logger.warning(f"Node {gid} has no heartbeat")
         return dead_nodes
 
     def _resolve_world(self, admit_joiners: bool = False) -> bool:
@@ -291,17 +351,21 @@ class ElasticDeviceMesh:
             return False
 
         # Remap live ranks to smaller world_size caused by dead nodes
-        leaving_ranks = set(dead_nodes)
-        live_ranks = [i for i in range(self.world_info.global_world_size) if i not in leaving_ranks]
+        leaving_nodes = set(dead_nodes)
+        live_ranks = [i for i in self._global_ids if i not in leaving_nodes]
         for i, rank in enumerate(live_ranks):
-            self.global_store.set(f"rank_map_{rank}", str(i))
+            self.global_store.set(f"rank_{rank}", str(i))
+            self.global_store.set(f"gid_{i}", rank)
         new_world_size = len(live_ranks)
 
         # Give joiners new ranks
         for joiner_id in joiners:
             self.global_store.set(f"rank_{joiner_id}", str(new_world_size))
+            self.global_store.set(f"gid_{new_world_size}", joiner_id)
+            live_ranks.append(joiner_id)
             new_world_size += 1
 
+        self._global_ids = live_ranks
         for i in range(1, new_world_size):
             self.global_store.set(f"barrier_{i}", "null")
         # Update world_size
@@ -319,7 +383,6 @@ class ElasticDeviceMesh:
         Returns:
             bool: True if the global_pg was reinitialized, False otherwise.
         """
-
         if not self.enable:
             # no op if disabled
             return
@@ -342,35 +405,9 @@ class ElasticDeviceMesh:
             return False
 
         # Reinit Path
-        self._logger.info("Reinitializing global_pg")
-        if hasattr(self, "global_pg"):
-            if sys.getrefcount(self.global_pg) > 2:
-                self._logger.warning(
-                    f"Global PG refcount was {sys.getrefcount(self.global_pg)} when 2 is expected during deletion. This may cause a memory leak."
-                )
-            del self.global_pg  # TODO(jackmin): Where do we catch errors in teardown?
-        self._logger.info("Destroyed process group")
-
-        # Check if we got remapped
-        old_global_rank = self.world_info.global_rank
-        self.world_info.global_rank = int(
-            self.global_store.get(f"rank_map_{self.world_info.global_rank}").decode("utf-8")
-        )
-
-        self.world_info.global_world_size = int(self.global_store.get("world_size").decode("utf-8"))
-        self.mesh_count = int(self.global_store.get("mesh_count").decode("utf-8"))
-        self._logger.debug(
-            f"New global rank: {self.world_info.global_rank}, New global world size: {self.world_info.global_world_size} New mesh count: {self.mesh_count}"
-        )
-        prefix_store = dist.PrefixStore(f"mesh_{self.mesh_count}", self.global_store)
-        self._logger.debug(f"Created prefix store with mesh_{self.mesh_count}")
-
-        # Create process group
         try:
-            self.global_pg = dist.ProcessGroupGloo(
-                prefix_store, self.world_info.global_rank, self.world_info.global_world_size, TCPSTORE_TIMEOUT
-            )
-            self._logger.debug("Successfully recreated process group")
+            self._create_global_pg()
+            self._optimize_ring_ranks()
         except Exception as e:
             self._logger.error(f"Error recreating process group: {e}. Retrying...")
             return self.maybe_reinit_global_pg(admit_joiners=admit_joiners)
@@ -378,11 +415,6 @@ class ElasticDeviceMesh:
         if self._global_leader:
             self._clear_joiners()
             self.global_store.set("status", "running")
-
-        # Update rank if needed (otherwise, the next remap will do the lookup incorrectly)
-        if old_global_rank != self.world_info.global_rank:
-            self.global_store.set(f"rank_{self.world_info.global_unique_id}", str(self.world_info.global_rank))
-            self.live_recovery.reset()
 
         self._logger.debug("Reinitialized global_pg done in %s seconds", time.perf_counter() - time_start)
 
@@ -433,6 +465,74 @@ class ElasticDeviceMesh:
                 time.sleep(TCPSTORE_POLLING_INTERVAL)
 
         self._logger.debug("Monitored barrier resolved in %s seconds", time.perf_counter() - time_start)
+
+    def get_pings(self) -> List[List[int]]:
+        pings = [[1000_000_000] * self.world_info.global_world_size for _ in range(self.world_info.global_world_size)]
+        for i, e1 in enumerate(self._global_ids):
+            for j, e2 in enumerate(self._global_ids):
+                if i == j:
+                    continue
+                pings[i][j] = int(self.god_store.get(f"ping_{e1}_{e2}"))
+        self._logger.debug("Pings: %s", "\n".join(map(str, pings)))
+        return pings
+
+    def _start_iperf_server(self) -> None:
+        """Start the iperf server process."""
+        try:
+            from zeroband.utils.ip import get_ip_address
+
+            iperf_addr = get_ip_address(IPERF_IFNAME)
+            iperf_port = IPERF_PORT + self.world_info.global_rank
+            cmd: List[str] = ["iperf", "-s", "-p", str(iperf_port)]
+            self.server_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.god_store.set(f"iperf_{self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
+            self._logger.info(f"Started iperf server on {iperf_addr} with port {iperf_port}")
+        except Exception as e:
+            self._logger.error(f"Failed to start iperf server: {str(e)}")
+            raise
+
+    def _measure_connectivity(self):
+        for i in self._global_ids:
+            if i == self.world_info.global_unique_id:
+                continue
+            target_host, target_port = self.god_store.get(f"iperf_{i}").decode("utf-8").split(":")
+            target_port = int(target_port)
+            time_taken = self.measure_bandwidth(target_host, target_port)
+            self.god_store.set(f"ping_{self.world_info.global_unique_id}_{i}", str(time_taken))
+
+    def measure_bandwidth(self, target_host: str, target_port: int) -> int:
+        """
+        Measure bandwidth to a specific target.
+
+        Args:
+            target_host: The host to measure bandwidth to
+            target_port: The port to measure bandwidth to
+
+        Returns:
+            int: The time taken to transfer 10Tb of data in seconds
+        """
+        try:
+            cmd: List[str] = [
+                "iperf",
+                "-c",
+                target_host,
+                "-p",
+                str(target_port),
+                "-t",
+                "1",  # 1 second test
+            ]
+            result: subprocess.CompletedProcess = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+            if result.returncode != 0:
+                raise Exception(f"iperf error: {result.stderr}")
+
+            time_taken: int = int(1e13 / parse_iperf_output(result.stdout))
+            time_taken = min(time_taken, 1_000_000_000)
+
+            return time_taken
+        except Exception as e:
+            self._logger.error(f"Error measuring bandwidth to {target_host}:{target_port} {str(e)}")
+            return int(1e9)
 
 
 class LiveRecovery:
