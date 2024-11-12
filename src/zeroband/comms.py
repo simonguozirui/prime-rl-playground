@@ -159,6 +159,9 @@ class ElasticDeviceMesh:
         self._logger.debug("Global pg created with %d peers. Timeout of %s", self.global_pg.size(), GLOBAL_PG_TIMEOUT)
 
     def _optimize_ring_ranks(self):
+        self._global_ids = [
+            self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)
+        ]
         if self.world_info.local_rank == 0:
             self._logger.debug("Measuring bandwidths")
             self._measure_connectivity()
@@ -373,6 +376,9 @@ class ElasticDeviceMesh:
             new_world_size += 1
 
         self._global_ids = live_ranks
+        for i in self._global_ids:
+            for j in self._global_ids:
+                self.global_store.set(f"ping_{i}_{j}", "1000_000_000")
         for i in range(1, new_world_size):
             self.global_store.set(f"barrier_{i}", "null")
         # Update world_size
