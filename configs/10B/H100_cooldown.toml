@@ -10,7 +10,7 @@ ac_ckpt = true
 sched_type = "wsd-sqrt"
 batch_size = 128 #1M tokens bs
 warmup_steps = 1000
-num_stable_steps = 74700
+stable_steps = 74700
 total_steps = 90400
 lr = 7.5e-5
 
