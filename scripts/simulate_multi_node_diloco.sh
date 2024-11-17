@@ -56,6 +56,7 @@ export GLOBAL_ADDR=localhost
 export GLOBAL_PORT=${GLOBAL_PORT:-5565}
 export GLOBAL_WORLD_SIZE=$N
 export BASE_PORT=${BASE_PORT:-10001}
+export GLOO_SOCKET_IFNAME=lo
 
 for i in $(seq 0 $(($N - 1 )))
 do
