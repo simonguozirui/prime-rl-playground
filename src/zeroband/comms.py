@@ -76,12 +76,13 @@ class ElasticDeviceMesh:
         self.cpu_local_mesh = init_device_mesh("cpu", mesh_shape=(self.local_pg.size(),))
 
         # Logging
-        self._optimize_ring_ranks()
-        if self.live_recovery_rank_src is not None:
-            self.live_recovery.ask_for_live_ckpt(self.live_recovery_rank_src)
-        self.global_pg.barrier().wait()
+        if self.enable:
+            self._optimize_ring_ranks()
+            if self.live_recovery_rank_src is not None:
+                self.live_recovery.ask_for_live_ckpt(self.live_recovery_rank_src)
+            self.global_pg.barrier().wait()
 
-        self._logger.info(f"global_pg size : {self.global_pg.size()}, local_pg size: {self.local_pg.size()}")
+            self._logger.info(f"global_pg size : {self.global_pg.size()}, local_pg size: {self.local_pg.size()}")
 
     def __del__(self):
         self._stop_heartbeat()
