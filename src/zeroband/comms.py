@@ -489,7 +489,8 @@ class ElasticDeviceMesh:
                 if i == j:
                     continue
                 pings[i][j] = int(self.god_store.get(f"ping_{e1}_{e2}"))
-        self._logger.debug("Pings: %s", "\n".join(map(str, pings)))
+
+        self._logger.debug("\n %s", format_grid(pings))
         return pings
 
     def _start_iperf_server(self) -> None:
@@ -549,6 +550,36 @@ class ElasticDeviceMesh:
         except Exception as e:
             self._logger.error(f"Error measuring bandwidth to {target_host}:{target_port} {str(e)}")
             return int(1e9)
+
+
+def format_grid(grid):
+    N = len(grid)
+
+    # Set the main diagonal elements to 0
+    for i in range(N):
+        grid[i][i] = 0
+
+    # Determine the width needed for formatting based on max possible value (99.99) and indices
+    cell_width = 6
+
+    # Create header row with column indices
+    header_row = "   " + " | ".join(f"{j:>{cell_width-1}}" for j in range(N))
+
+    # Start building the formatted grid string
+    formatted_grid = header_row + "\n"
+
+    for i, row in enumerate(grid):
+        # Format each element in the row
+        formatted_row = [f"{i:>2}"]  # Add row index at the beginning of the row
+        for value in row:
+            # Divide by 1000 and format to 2 decimal places
+            formatted_value = f"{value / 1000:.2f}"
+            formatted_row.append(formatted_value)
+
+        # Join the elements of the row with '|' and add it to the grid string
+        formatted_grid += " | ".join(formatted_row).center(cell_width * (N + 1)) + "\n"
+
+    return formatted_grid.strip()
 
 
 class LiveRecovery:
