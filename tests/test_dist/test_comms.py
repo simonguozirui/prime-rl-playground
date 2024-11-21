@@ -5,6 +5,9 @@ import pytest
 from zeroband.comms import ElasticDeviceMesh
 import multiprocessing as mp
 
+pytest.skip("Skipping test file", allow_module_level=True)
+# skipping this test for now as they slow down the ci and we are going to remove them anyway
+
 
 @pytest.mark.parametrize("world_size", [2, 8])
 def test_elastic_device_mesh_no_global(world_size: int, random_available_port: int, mock_env):

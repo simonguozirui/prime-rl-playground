@@ -56,6 +56,7 @@ def _test_multi_gpu(num_gpus, config, extra_args=[], diloco=False):
                 "GLOBAL_ADDR": "localhost",
                 "GLOBAL_WORLD_SIZE": str(num_nodes),
                 "GLOBAL_PORT": str(new_port),
+                "GLOO_SOCKET_IFNAME": "lo",
             }
             env.update(new_env)
 
