@@ -41,7 +41,7 @@ A research paper about the framework and our INTELLECT-1 10B experiment is comin
 For an easy install that download the data
 
 ```
-curl -sSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime/scripts/install/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime/main/scripts/install/install.sh | bash
 ```
 
 step by step :
