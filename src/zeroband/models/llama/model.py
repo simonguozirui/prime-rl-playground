@@ -12,18 +12,31 @@
 
 
 from dataclasses import dataclass
-from importlib.util import find_spec
-from typing import Literal, Optional, Tuple
-from einops import rearrange
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from zeroband.models.norms import build_norm
 
-flash_attn_available = find_spec("flash_attn") is not None
-if flash_attn_available:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention, BlockMask, _DEFAULT_SPARSE_BLOCK_SIZE
+
+_flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
+
+
+# copied from https://github.com/pytorch/torchtune/blob/f2bd4bc25b24587aef40f486087412b9da8f1d94/torchtune/modules/attention_utils.py#L27
+# We cannot do nested compile, but flex attention only has perf benefits
+# when compiled. To insulate it from the compiler, we wrap it with
+# compiler.disable so that it can be used regardless of whether the model
+# is compiled or not, and flex attention always remains compiled.
+@torch.compiler.disable(recursive=False)
+def flex_attention_compiled(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_mask: BlockMask,
+) -> torch.Tensor:
+    return _flex_attention_compiled(q, k, v, block_mask=block_mask)
 
 
 @dataclass
@@ -44,8 +57,6 @@ class ModelArgs:
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
     norm_type: str = "fused_rmsnorm"
-
-    attn_fn: Literal["sdpa", "flash"] = "sdpa"
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -138,6 +149,48 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+def seqlens_to_docs_tensor(seqlens: list[torch.Tensor]) -> torch.Tensor:
+    """Converts list of sequence lengths to document indices tensor.
+    Example:
+        seqlens = [tensor([2,2,1]), tensor([2,2,1])]  # List of 2 tensors
+        docs = [[0,0,1,1,2], [0,0,1,1,2]] # Each doc_id repeated per its length
+    """
+    return torch.stack([torch.repeat_interleave(torch.arange(len(seq), device=seq.device), seq) for seq in seqlens])
+
+
+def create_block_mask_from_seqlens(seqlens: list[torch.Tensor]) -> BlockMask:
+    """Creates a block mask from a list of sequence lengths.
+
+    Example:
+        seqlens = [tensor([2,2,1]))]  # List of 2 tensors
+        docs = [[0,0,1,1,2]] # Each doc_id repeated per its length
+
+        mask = [[1 1 0 0 0]  # First token of doc 0 can see itself and second token of doc 0
+                [1 1 0 0 0]  # Second token of doc 0 can see both tokens of doc 0
+                [0 0 1 1 0]  # First token of doc 1 can see itself and second token of doc 1
+                [0 0 1 1 0]  # Second token of doc 1 can see both tokens of doc 1
+                [0 0 0 0 1]] # Token of doc 2 can only see itself
+    """
+    docs = seqlens_to_docs_tensor(seqlens).to("cuda")
+    batch_size, max_seq_len = docs.shape
+
+    def document_causal_mask(b, h, q_idx, kv_idx):
+        causal_mask = q_idx >= kv_idx
+        document_mask = docs[b, q_idx] == docs[b, kv_idx]
+        return causal_mask & document_mask
+
+    return create_block_mask(
+        document_causal_mask,
+        batch_size,
+        None,
+        max_seq_len,
+        max_seq_len,
+        device="cuda",
+        _compile=True,
+        BLOCK_SIZE=max_seq_len if max_seq_len < _DEFAULT_SPARSE_BLOCK_SIZE else _DEFAULT_SPARSE_BLOCK_SIZE,
+    )
+
+
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -164,8 +217,6 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
 
-        self.attn_fn = model_args.attn_fn
-
         self.wq = nn.Linear(model_args.dim, model_args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -180,7 +231,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        seqlens: torch.Tensor | None = None,
+        block_mask: BlockMask | None = None,
     ):
         """
         Forward pass of the attention module.
@@ -214,7 +265,7 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        output = self.self_attention(xq, xk, xv, seqlens)
+        output = self.self_attention(xq, xk, xv, block_mask)
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
@@ -224,55 +275,21 @@ class Attention(nn.Module):
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         return output
 
-    def _flash_attention(self, xq, xk, xv) -> torch.Tensor:
-        q = rearrange(xq, "b n t h -> b t n h")
-        k = rearrange(xk, "b n t h -> b t n h")
-        v = rearrange(xv, "b n t h -> b t n h")
-        # q/k/b is [b, nh, t, hs] but fa2 expected [b , t, nh, hs]
-        return flash_attn_func(q, k, v, causal=True)
-
-    def _fa_attention_with_seqlens(self, xq, xk, xv, seqlens) -> torch.Tensor:
-        b = xq.shape[0]
-        cu_seqlens = (
-            torch.concat([torch.tensor([0]).to(xq.device), seqlens.cumsum(0)], dim=0).to(torch.int32).to(xq.device)
-        )
-        max_seqlen = seqlens.max()
-
-        q = rearrange(xq, "b n t h -> (b t) n h")
-        k = rearrange(xk, "b n t h -> (b t) n h")
-        v = rearrange(xv, "b n t h -> (b t) n h")
-        # q/k/v is [b, nh, t, hs] but fa expected [b * t, nh, hs]
-
-        y = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
-            causal=True,
-        )
-
-        y = rearrange(y, "(b t) n h -> b t n h", b=b)
-        return y
+    def _flex_attention_with_seqlens(self, xq, xk, xv, block_mask: BlockMask) -> torch.Tensor:
+        output = flex_attention_compiled(xq, xk, xv, block_mask=block_mask)
+        output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        return output
+        # output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        # output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        # return output
 
     def self_attention(
-        self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, seqlens: torch.Tensor | None = None
+        self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, block_mask: BlockMask | None = None
     ) -> torch.Tensor:
-        if self.attn_fn == "sdpa":
-            if seqlens is not None:
-                raise NotImplementedError("SDPA with seqlens is not implemented.")
-            return self._sdpa_attention(xq, xk, xv)
-        elif self.attn_fn == "flash":
-            if not flash_attn_available:
-                raise RuntimeError("Flash attention is not available. Please install flash_attn.")
-            if seqlens is not None:
-                return self._fa_attention_with_seqlens(xq, xk, xv, seqlens)
-            else:
-                return self._flash_attention(xq, xk, xv)
+        if block_mask is not None:
+            return self._flex_attention_with_seqlens(xq, xk, xv, block_mask)
         else:
-            raise ValueError(f"Unknown attention function: {self.attn_fn}")
+            return self._sdpa_attention(xq, xk, xv)
 
 
 class FeedForward(nn.Module):
@@ -365,7 +382,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        seqlens: torch.Tensor | None = None,
+        block_mask: BlockMask | None = None,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -378,7 +395,7 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, seqlens=seqlens)
+        h = x + self.attention(self.attention_norm(x), freqs_cis, block_mask=block_mask)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -475,14 +492,13 @@ class Transformer(nn.Module):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, seqlens: torch.Tensor | None = None):
+    def forward(self, tokens: torch.Tensor, block_mask: BlockMask | None = None):
         """
         Perform a forward pass through the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input token indices.
-            seqlens (torch.Tensor | None): Sequence lengths tensor for packing.
-
+            block_mask (BlockMask | None): Block mask for attention.
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
@@ -491,7 +507,7 @@ class Transformer(nn.Module):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, seqlens=seqlens)
+            h = layer(h, self.freqs_cis, block_mask=block_mask)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h).float() if self.output else h
