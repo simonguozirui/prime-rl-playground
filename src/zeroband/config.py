@@ -7,9 +7,12 @@ from zeroband.checkpoint import CkptConfig
 from zeroband.data import DataConfig
 from zeroband.diloco import DilocoConfig
 from zeroband.models.llama.model import AttnFnType
+from zeroband.optimizers import OptimizersConfig, AdamConfig
 
 
 class OptimConfig(BaseConfig):
+    optim: OptimizersConfig = AdamConfig()
+
     lr: float = 4e-4
     weight_decay: float = 0.1
     adam_betas1: float = 0.9

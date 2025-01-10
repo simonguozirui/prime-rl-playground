@@ -116,7 +116,19 @@ def test_packing(packing: bool):
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
 
 
-def test_ckpt(tmp_path: Path):
+@pytest.mark.parametrize("diloco", [False, True])
+def test_soap(diloco: bool):
+    num_gpus = [1, 2] if diloco else [2, 1]
+    _test_multi_gpu(
+        num_gpus,
+        "debug/diloco.toml" if diloco else "debug/normal.toml",
+        extra_args=["--optim.optim.precondition_frequency", "1"],
+        diloco=diloco,
+    )
+
+
+@pytest.mark.parametrize("soap", [False, True])
+def test_ckpt(tmp_path: Path, soap: bool):
     num_gpus = [1, 2]
     v1_file = tmp_path / "v1.log"
     v2_file = tmp_path / "v2.log"
@@ -146,7 +158,8 @@ def test_ckpt(tmp_path: Path):
             "--no-train.sequence_packing",
             "--train.attn_fn",
             "math",
-        ],
+        ]
+        + (["--optim.optim.precondition_frequency", "1"] if soap else []),
         diloco=True,
     )
     _test_multi_gpu(
@@ -167,7 +180,8 @@ def test_ckpt(tmp_path: Path):
             "--no-train.sequence_packing",
             "--train.attn_fn",
             "math",
-        ],
+        ]
+        + (["--optim.optim.precondition_frequency", "1"] if soap else []),
         diloco=True,
     )
     # _test_multi_gpu(
