@@ -7,7 +7,6 @@ from pydantic_config import BaseConfig
 from zeroband.utils.logging import get_logger
 
 import torch
-from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset, Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful
@@ -300,7 +299,7 @@ def get_dataloader(
     rank: int,
     batch_size: int,
     data_config: DataConfig,
-) -> DataLoader:
+) -> StatefulDataLoader:
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:
