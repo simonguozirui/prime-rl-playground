@@ -6,6 +6,7 @@ import torch.utils.benchmark as benchmark
 from zeroband.collectives import Compression, all_reduce
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
+
 from enum import Enum
 
 
@@ -63,6 +64,6 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
     init_process_group(backend="gloo")
 
-    logger = get_logger(config)
+    logger = get_logger()
     main(config)
     destroy_process_group()
