@@ -794,6 +794,19 @@ wheels = [
 ]
 
 [[package]]
+name = "liger-kernel"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+    { name = "triton" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/cb/5b6debc3fc29bb6a034446a0f1e90cfdfa246772edb6484c3c7db6e295d9/liger_kernel-0.5.2.tar.gz", hash = "sha256:784b5e74848d6802f52e38766bdc0241bf723040f8bf82b153485dd2c9ba0054", size = 70272 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/9e/b05809867d937dbcba4d8717197f69d05a1d41087e7a5c2fdbd5cae79c33/liger_kernel-0.5.2-py3-none-any.whl", hash = "sha256:31a7409ac9db20fc77e7caf8ab146f56d37d4a1d22e3cefd08661560a99d0c46", size = 104184 },
+]
+
+[[package]]
 name = "lm-eval"
 version = "0.4.5"
 source = { registry = "https://pypi.org/simple" }
@@ -2476,7 +2489,7 @@ name = "triton"
 version = "3.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "filelock", marker = "python_full_version < '3.13' and sys_platform == 'linux'" },
+    { name = "filelock" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/98/29/69aa56dc0b2eb2602b553881e34243475ea2afd9699be042316842788ff5/triton-3.1.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6b0dd10a925263abbe9fa37dcde67a5e9b2383fc269fdf59f5657cac38c5d1d8", size = 209460013 },
@@ -2732,6 +2745,7 @@ dependencies = [
     { name = "datasets" },
     { name = "einops" },
     { name = "fsspec", extra = ["gcs"] },
+    { name = "liger-kernel" },
     { name = "ninja" },
     { name = "numpy" },
     { name = "psutil" },
@@ -2770,6 +2784,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=3.0.0" },
     { name = "einops" },
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
+    { name = "liger-kernel" },
     { name = "lm-eval", marker = "extra == 'all'" },
     { name = "ninja" },
     { name = "numpy" },
@@ -2778,7 +2793,7 @@ requires-dist = [
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=74c94ee" },
     { name = "requests", marker = "extra == 'all'", specifier = ">=2.32.3" },
     { name = "setuptools" },
-    { name = "toposolve", specifier = "==0.1.17" },
+    { name = "toposolve", specifier = ">=0.1.17" },
     { name = "torch", specifier = "==2.5.1" },
     { name = "torch-shampoo", git = "https://github.com/facebookresearch/optimizers.git?rev=main" },
     { name = "torchdata", specifier = ">=0.8.0" },

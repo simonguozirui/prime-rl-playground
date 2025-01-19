@@ -1,11 +1,15 @@
+from enum import Enum
 from typing import Any, Literal, TypeAlias
 import os
 
 from pydantic import create_model, model_validator
 from pydantic_config import BaseConfig
 
-from zeroband.collectives import Compression
-from zeroband.models.llama.model import AttnFnType
+AttnFnType: TypeAlias = Literal["flex", "math"]
+
+class Compression(Enum):
+    NO = "no"
+    UINT8 = "uint8"
 
 
 class DataConfig(BaseConfig):
@@ -75,8 +79,8 @@ class MemoryProfilerConfig(BaseConfig):
 
 
 class TrainConfig(BaseConfig):
-    micro_bs: int
-    torch_compile: bool = True
+    micro_bs: int = 1
+
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
 
@@ -89,6 +93,10 @@ class TrainConfig(BaseConfig):
     torch_profiler: bool = False
 
     sequence_packing: bool = True
+
+    torch_compile: bool = True
+
+    fused_linear_ce: bool = False
 
     attn_fn: AttnFnType = "flex"
 

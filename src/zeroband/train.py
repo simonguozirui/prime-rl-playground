@@ -116,11 +116,8 @@ def train(config: Config):
     with record_function("Get model"):
         logger.debug("Getting model")
         model, model_config = get_model(
-            config.name_model,
-            config.type_model,
-            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
-            seq_length=config.data.seq_length,
-            attn_fn=config.train.attn_fn,
+            config,
+            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE
         )
 
     with record_function("Distribute model"):
@@ -299,7 +296,7 @@ def train(config: Config):
 
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                # no sync if we are accumulating gradients
+                # no sync if we are accumulatirecord_functionng gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
                 with record_function("Load batch"):
@@ -320,11 +317,15 @@ def train(config: Config):
                     flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 with record_function("Loss calculation"):
+                    if (config.train.fused_linear_ce and config.optim.z_loss):
+                        raise NotImplementedError("Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527")
+
                     ce_loss, z_loss = compute_cross_entropy_loss(
                         flatten_logits,
                         flatten_labels,
                         z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
-                        num_chunks=config.optim.num_chunks
+                        num_chunks=config.optim.num_chunks,
+                        fused_linear_weight=model.output.weight if config.train.fused_linear_ce else None,
                     )
                     del logits
 
@@ -500,6 +501,7 @@ if __name__ == "__main__":
     world_info = get_world_info()
     logger = get_logger(config)
 
+    # torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
 
     def pretty_dict(d, indent=2):
