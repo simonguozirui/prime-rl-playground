@@ -33,7 +33,8 @@ from zeroband.utils.monitor import HttpMonitor
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
+from zeroband.utils.stopwatch import Stopwatch
 
 from transformers import AutoTokenizer
 from pydantic_config import parse_argv
@@ -93,19 +94,21 @@ def train(config: Config):
             config.ckpt.interval % config.diloco.inner_steps == 0
         ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
 
-    if config.data.fake and config.name_model == "debugmodel":
-        tokenizer = FakeTokenizer()
-    elif config.type_model == "llama2":
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif config.type_model == "llama3":
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
-    else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+    sw = Stopwatch(config)
+    sw.start("train()")
 
-    logger.debug("tokenizer loaded")
+    # Load tokenizer
+    with sw.record_block("Load Tokenizer"):
+        if config.data.fake and config.name_model == "debugmodel":
+            tokenizer = FakeTokenizer()
+        elif config.type_model == "llama2":
+            tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
+        elif config.type_model == "llama3":
+            tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+        else:
+            raise ValueError(f"Model type {config.type_model} not supported")
 
-    with record_function("Get dataloader"):
-        logger.debug("Getting dataloader")
+    with sw.record_block("Get Dataloader"):
         train_dataloader = get_dataloader(
             tokenizer=tokenizer,
             world_size=world_info.world_size,
@@ -115,12 +118,12 @@ def train(config: Config):
         )
         train_dataloader_iterator = iter(train_dataloader)
 
-    with record_function("Get model"):
-        logger.debug("Constructing model")
+    with sw.record_block("Get Model"):
         model, model_config = get_model(
             config,
             vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         )
+
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
@@ -133,7 +136,7 @@ def train(config: Config):
         config.data.seq_length,
     )
 
-    with record_function("Shard model"):
+    with sw.record_block("Shard Model"):
         if config.train.ac_ckpt:
             num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
             apply_ac_ckpt(model, num)
@@ -169,10 +172,9 @@ def train(config: Config):
             reshard_after_forward=config.train.reshard_after_forward,
             offload_policy=offload_policy,
         )
-        logger.debug("model fsdped")
 
     # Setup optimizers
-    with record_function("Set up Optimizers"):
+    with sw.record_block("Optimizer Setup"):
         inner_optimizer = get_optimizer(config, model.parameters())
 
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
@@ -199,8 +201,6 @@ def train(config: Config):
             diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,  # type: ignore
         )
 
-        logger.debug("Optimizers set up.")
-
     if world_info.rank == 0:
         logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
         metric_logger = logger_cls(
@@ -211,14 +211,13 @@ def train(config: Config):
     else:
         metric_logger = None
 
-    with record_function("Compile model"):
+    with sw.record_block("Compile Model"):
         if config.train.torch_compile:
             # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
             model = torch.compile(model) if not TYPE_CHECKING else model
-            logger.debug("model compiled")
 
-    with record_function("Resume checkpoint"):
-        if config.ckpt.resume is not None:
+    if config.ckpt.resume is not None:
+        with sw.record_block("Resume Checkpoint"):
             # all is inplace
             ckpt_manager.load(
                 resume_ckpt_path=config.ckpt.resume,
@@ -239,7 +238,7 @@ def train(config: Config):
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
     perf_counter = PerfCounter(window_size=10)
 
-    logger.info("starting training")
+    logger.debug("Finished setup in %f seconds", sw.elapsed())
 
     need_live_recovery = config.ckpt.live_recovery_rank_src is not None
     while True:
@@ -297,74 +296,74 @@ def train(config: Config):
 
         for inner_step in range(num_inner_steps):
             logger.debug("Starting inner step.")
+            sw.start("inner_step")
 
             loss_batch = 0
             z_loss_batch = 0
 
-            for grad_acc_step in range(gradient_accumulation_steps):
-                logger.debug("Starting gradient accumulation step.")
+            with sw.record_block("Grad Acc Steps"):
+                for grad_acc_step in range(gradient_accumulation_steps):
+                    sw.start("grad_acc_step")
 
-                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                # no sync if we are accumulating gradients
-                model.set_requires_gradient_sync(not is_accumulating)
+                    is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+                    # no sync if we are accumulating gradients
+                    model.set_requires_gradient_sync(not is_accumulating)
 
-                with record_function("Load batch"):
-                    logger.debug("Loading batch")
-                    # TODO/NOTE: We could overlap sending the batch with communication
-                    #            although to be honest the perf impact is minimal
-                    batch = next(train_dataloader_iterator)
-                    input_ids = batch["input_ids"].to("cuda")
-                    labels = batch["labels"].to("cuda")
-                    if config.train.sequence_packing:
-                        seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-                        block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
-                    else:
-                        seqlens = None
-                        block_mask = None
+                    with sw.record_block("Load batch"):
+                        # TODO/NOTE: We could overlap sending the batch with communication
+                        #            although to be honest the perf impact is minimal
+                        batch = next(train_dataloader_iterator)
+                        input_ids = batch["input_ids"].to("cuda")
+                        labels = batch["labels"].to("cuda")
+                        if config.train.sequence_packing:
+                            seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
+                            block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
+                        else:
+                            seqlens = None
+                            block_mask = None
 
-                with record_function("Run model"):
-                    logger.debug("Running forward()")
-                    logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                    flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b seq) vocab
-                    flatten_labels = labels.reshape(-1)                   # b seq -> (b seq)
+                    with sw.record_block("Run forward()"):
+                        logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                        flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
+                        flatten_labels = labels.reshape(-1)                   # b seq -> (b * seq)
 
-                with record_function("Loss calculation"):
-                    logger.debug("Computing loss")
-                    ce_loss, z_loss = compute_cross_entropy_loss(
-                        flatten_logits,
-                        flatten_labels,
-                        z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
-                        num_chunks=config.optim.num_chunks,
-                        fused_linear_weight=model.output.weight if config.train.fused_linear_ce else None,
-                    )
+                    with sw.record_block("Loss Calculation"):
+                        ce_loss, z_loss = compute_cross_entropy_loss(
+                            flatten_logits,
+                            flatten_labels,
+                            z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
+                            num_chunks=config.optim.num_chunks,
+                            fused_linear_weight=model.output.weight if config.train.fused_linear_ce else None,
+                        )
 
-                    del logits
-                    del flatten_logits
-                    del flatten_labels
+                        del logits
+                        del flatten_logits
+                        del flatten_labels
 
-                    if config.optim.z_loss:
-                        assert z_loss is not None
-                        ce_loss /= gradient_accumulation_steps
-                        z_loss /= gradient_accumulation_steps
-                        loss = ce_loss + z_loss
-                    else:
-                        loss = ce_loss / gradient_accumulation_steps
+                        if config.optim.z_loss:
+                            assert z_loss is not None
+                            ce_loss /= gradient_accumulation_steps
+                            z_loss /= gradient_accumulation_steps
+                            loss = ce_loss + z_loss
+                        else:
+                            loss = ce_loss / gradient_accumulation_steps
 
-                with record_function("Backward"):
-                    logger.debug("Running backward()")
-                    loss.backward()
+                    with sw.record_block("Run backward()"):
+                        loss.backward()
 
-                with record_function("Clone loss"):
-                    logger.debug("Cloning loss")
-                    if config.optim.z_loss:
-                        assert z_loss is not None
-                        loss_batch += ce_loss.detach().clone()
-                        z_loss_batch += z_loss.detach().clone()
-                    else:
-                        loss_batch += loss.detach().clone()
+                    with record_function("Clone Loss"):
+                        # No need to time, takes 0 seconds
+                        if config.optim.z_loss:
+                            assert z_loss is not None
+                            loss_batch += ce_loss.detach().clone()
+                            z_loss_batch += z_loss.detach().clone()
+                        else:
+                            loss_batch += loss.detach().clone()
 
-            with record_function("Inner allreduce"):
-                logger.debug("loss allreduce()")
+                    elapsed = sw.stop("grad_acc_step")
+                    logger.debug(f"Grad acc step {grad_acc_step} completed in {elapsed:.2f} seconds")
+
+            with sw.record_block("Loss allreduce()"):
                 # Launch both allreduces at the same time to hide latency
                 loss_allreduce = dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
                 if config.optim.z_loss:
@@ -376,16 +375,14 @@ def train(config: Config):
                     assert isinstance(z_loss_allreduce, torch.distributed.Work)
                     z_loss_allreduce.wait()
 
-            with record_function("Clip grad"):
-                logger.debug("clipping grad")
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()
-                # full tensor needed because grad_norm is a DTensor
+            with sw.record_block("Clip Grad"):
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor() # type: ignore (is a dtensor)
 
-            with record_function("Optimizer step"):
-                logger.debug("inner optimizer step()")
+            with sw.record_block("Optimizer Step"):
                 inner_optimizer.step()
                 scheduler.step()
-                logger.debug("inner optimizer zero_grad()")
+
+            with sw.record_block("Optimizer Zero Grad"):
                 inner_optimizer.zero_grad()
 
             # logging
@@ -442,6 +439,9 @@ def train(config: Config):
 
             if config.train.memory_profiler is not None:
                 memory_profiler.step()
+
+            elapsed = sw.stop("inner_step")
+            logger.debug(f"Inner step {inner_step} completed in {elapsed:.2f} seconds")
 
         if config.diloco is not None:
             assert diloco is not None
