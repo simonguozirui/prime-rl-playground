@@ -47,7 +47,7 @@ main() {
     source .venv/bin/activate
     
     log_info "Installing dependencies..."
-    uv sync --extra all
+    uv sync
         
     log_info "Updating git submodules..."
     git submodule update --init --recursive
