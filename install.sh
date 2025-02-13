@@ -27,7 +27,7 @@ main() {
     sudo apt install iperf -y
 
     log_info "Cloning repository..."
-    git clone https://github.com/PrimeIntellect-ai/prime.git
+    git clone https://github.com/samsja/prime.git
     
     log_info "Entering project directory..."
     cd prime
