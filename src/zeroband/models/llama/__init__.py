@@ -7,7 +7,7 @@
 # Llama 2 is licensed under the LLAMA 2 Community License,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from zeroband.config import Config
+from typing import Literal
 from zeroband.models.llama.model import ModelArgs, Transformer
 
 __all__ = ["Transformer"]
@@ -83,21 +83,21 @@ llama3_configs = {
 
 
 def get_model(
-    config: Config,
+    type_model: Literal["llama2", "llama3"],
+    name_model: str,
+    seq_length: int,
     vocab_size: int,
 ) -> tuple[Transformer, ModelArgs]:
     """get the transformer model"""
 
-    if config.type_model == "llama2":
-        model_config = llama2_configs[config.name_model]
-    elif config.type_model == "llama3":
-        model_config = llama3_configs[config.name_model]
+    if type_model == "llama2":
+        model_config = llama2_configs[name_model]
+    elif type_model == "llama3":
+        model_config = llama3_configs[name_model]
     else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+        raise ValueError(f"Model type {type_model} not supported")
 
     model_config.vocab_size = vocab_size
-    model_config.max_seq_len = config.data.seq_length
-    model_config.attn_fn = config.train.attn_fn
-    model_config.fused_linear_ce = config.train.fused_linear_ce
+    model_config.max_seq_len = seq_length
 
     return Transformer(model_config), model_config

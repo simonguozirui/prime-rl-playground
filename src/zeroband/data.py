@@ -3,8 +3,9 @@ import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 import functools
 
-from zeroband.utils.logger import get_logger
-from zeroband.config import DataConfig
+from pydantic_config import BaseConfig
+
+from zeroband.logger import get_logger
 
 import torch
 from torch.utils.data import IterableDataset, Dataset
@@ -17,6 +18,21 @@ from transformers import PreTrainedTokenizer
 
 
 TEST_VOCAB_SIZE = 1024
+
+
+class DataConfig(BaseConfig):
+    dataset_name_or_paths: str = "datasets/fineweb-edu"
+    val_dataset_name_or_paths: str | None = None
+    seq_length: int = 1024
+    fake: bool = False
+    num_workers: int = 4
+    max_train_samples: int | None = None
+    max_eval_samples: int | None = None
+    dataset_ratio: str | None = None
+    data_rank: int | None = None
+    data_world_size: int | None = None
+    reverse_data_files: bool = False
+    split_by_data_rank: bool = True
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -273,6 +289,7 @@ class InterleaveDataset(IterableDataset, Stateful):
             dataset.load_state_dict(state_dict[f"dataset_{i}"])
         self._init_random_state()
 
+
 def get_dataloader(
     tokenizer,
     world_size: int,
@@ -394,7 +411,6 @@ def load_all_datasets(
     else:
         split_rank = rank
         split_world_size = world_size
-
 
     get_logger().info("Loading Train dataset(s)")
 

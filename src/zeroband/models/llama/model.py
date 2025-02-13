@@ -13,13 +13,12 @@
 
 import contextlib
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from zeroband.models.norms import build_norm
-from zeroband.config import AttnFnType
 
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention, BlockMask, _DEFAULT_SPARSE_BLOCK_SIZE
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -63,7 +62,7 @@ class ModelArgs:
 
     fused_linear_ce: bool = False
 
-    attn_fn: AttnFnType = "flex"  # slow for testing
+    attn_fn: Literal["flex", "math"] = "flex"  # slow for testing
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
