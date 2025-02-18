@@ -48,7 +48,7 @@ uv run pytest
 6. debug run 
 
 ```bash
-uv run torchrun --nproc_per_node=2 train.py @ configs/debug/normal.toml
+uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/debug/normal.toml
 ```
 
 ...
