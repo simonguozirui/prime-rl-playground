@@ -4,7 +4,6 @@ from zeroband.logger import get_logger
 import socket
 import time
 import torch
-from torch.distributed.fsdp import ShardingStrategy
 
 
 def apply_ac_ckpt(model: Transformer, num: int):
@@ -25,22 +24,6 @@ def apply_ac_ckpt(model: Transformer, num: int):
 
     logger.debug(f"Applied activation checkpointing to {layers_ckpt} layers")
 
-
-def get_sharding_strategy(sharding_strategy: str) -> ShardingStrategy:
-    if sharding_strategy == "FULL_SHARD":
-        return ShardingStrategy.FULL_SHARD
-    elif sharding_strategy == "SHARD_GRAD_OP":
-        return ShardingStrategy.SHARD_GRAD_OP
-    elif sharding_strategy == "NO_SHARD":
-        return ShardingStrategy.NO_SHARD
-    elif sharding_strategy == "HYBRID_SHARD":
-        return ShardingStrategy.HYBRID_SHARD
-    elif sharding_strategy == "_HYBRID_SHARD_ZERO2":
-        return ShardingStrategy._HYBRID_SHARD_ZERO2
-    else:
-        raise ValueError(
-            f"Invalid sharding_strategy: {sharding_strategy}. Please choose 'FULL_SHARD', 'SHARD_GRAD_OP', 'NO_SHARD', 'HYBRID_SHARD', or '_HYBRID_SHARD_ZERO2'."
-        )
 
 
 ### code above inspired and copied from https://github.com/pytorch/torchtitan/blob/4b3f2e41a084bf79a8540068ed525539d1244edd/torchtitan/utils.py#L119

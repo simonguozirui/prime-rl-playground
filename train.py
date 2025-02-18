@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
 from zeroband.data import TEST_VOCAB_SIZE, DataConfig, get_dataloader
