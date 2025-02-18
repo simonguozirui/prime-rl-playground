@@ -27,7 +27,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true # allow direct references to git repos in dependencies
 
 [tool.ruff]
-line-length = 120
+line-length = 140
 
 [tool.uv]
 dev-dependencies = ["ruff>=0.5.0", "pre-commit>=3.0.0","pytest>=7.0.0", "faker"]
