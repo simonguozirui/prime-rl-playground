@@ -21,16 +21,21 @@ main() {
     sudo apt update
 
     log_info "Installing cmake python3-dev..."
-    sudo apt install python3-dev cmake -y
+    sudo apt install nvtop tmux cmake python3-dev htop  -y
 
-    log_info "Installing iperf..."
-    sudo apt install iperf -y
+
+    log_info "Installing gsutil..."
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
+    sudo apt-get update -y
+    sudo apt-get install -y google-cloud-cli
+
 
     log_info "Cloning repository..."
-    git clone https://github.com/samsja/prime.git
+    git clone git@github.com:PrimeIntellect-ai/prime-rl.git
     
     log_info "Entering project directory..."
-    cd prime
+    cd prime-rl
     
     log_info "Installing uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -57,7 +62,7 @@ main() {
     uv run python scripts/subset_data.py --dataset_name PrimeIntellect/fineweb-edu --data_world_size 1 --data_rank 0 --max_shards 128
     mv fineweb-edu/ datasets/fineweb-edu/
 
-    log_info "Installation completed! You can double check that everything is install correctly by running 'GLOO_SOCKET_IFNAME=lo GLOBAL_ADDR=localhost GLOBAL_RANK=0 GLOBAL_UNIQUE_ID=0 GLOBAL_WORLD_SIZE=1 GLOBAL_PORT=8989  uv run torchrun --nproc_per_node=2 src/zeroband/train.py  @configs/debug/diloco.toml'"
+    log_info "Installation completed! You can double check that everything is install correctly by running"
 }
 
 main
