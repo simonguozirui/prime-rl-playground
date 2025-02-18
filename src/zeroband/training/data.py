@@ -16,7 +16,7 @@ from datasets import load_dataset_builder, BuilderConfig
 from pyarrow import parquet as pq
 from transformers import PreTrainedTokenizer
 
-from zeroband.utils import FakeTokenizer
+from zeroband.training.utils import FakeTokenizer
 from transformers import AutoTokenizer
 
 

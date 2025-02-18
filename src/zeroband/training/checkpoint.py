@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from zeroband.world_info import get_world_info
+from zeroband.training.world_info import get_world_info
 
 
 @dataclass

@@ -1,6 +1,6 @@
 import logging
 
-from zeroband.world_info import get_world_info
+from zeroband.training.world_info import get_world_info
 
 logger = None
 

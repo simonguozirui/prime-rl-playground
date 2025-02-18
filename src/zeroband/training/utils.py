@@ -25,7 +25,6 @@ def apply_ac_ckpt(model: Transformer, num: int):
     logger.debug(f"Applied activation checkpointing to {layers_ckpt} layers")
 
 
-
 ### code above inspired and copied from https://github.com/pytorch/torchtitan/blob/4b3f2e41a084bf79a8540068ed525539d1244edd/torchtitan/utils.py#L119
 
 

@@ -7,12 +7,12 @@ import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
-from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
-from zeroband.data import TEST_VOCAB_SIZE, DataConfig, get_dataloader, get_tokenizer
-from zeroband.lr_scheduler import get_scheduler
+from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
+from zeroband.training.data import TEST_VOCAB_SIZE, DataConfig, get_dataloader, get_tokenizer
+from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.utils import (
+from zeroband.training.utils import (
     PerfCounter,
     get_peak_flops,
     get_num_params,
@@ -24,7 +24,7 @@ from zeroband.logger import get_logger
 from pydantic_config import BaseConfig, parse_argv
 import torch.nn.functional as F
 
-from zeroband.world_info import get_world_info
+from zeroband.training.world_info import get_world_info
 
 
 class AdamConfig(BaseConfig):
