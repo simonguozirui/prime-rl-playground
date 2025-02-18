@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 import os
 import time
 from typing import TYPE_CHECKING, Literal
@@ -8,6 +7,7 @@ import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
+from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.data import TEST_VOCAB_SIZE, DataConfig, get_dataloader
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
@@ -53,9 +53,17 @@ class TrainConfig(BaseConfig):
     torch_compile: bool = True
 
 
+class CkptConfig(BaseConfig):
+    path: str | None = None
+    interval: int | None = None
+    resume: str | None = None
+
+
 class Config(BaseConfig):
     name_model: Literal["debugmodel", "70M", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
     type_model: Literal["llama2", "llama3"] = "llama3"
+
+    ckpt: CkptConfig = CkptConfig()
 
     project: str = "prime_simple"
     wandb: bool = True
@@ -63,13 +71,6 @@ class Config(BaseConfig):
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
-
-
-@dataclass
-class TrainingProgress:
-    total_tokens: int
-    outer_step: int
-    step: int
 
 
 def train(config: Config):
@@ -148,13 +149,16 @@ def train(config: Config):
         num_training_steps=config.optim.total_steps,
     )
 
-    training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
+    training_progress = TrainingProgress(total_tokens=0, step=0)
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
+
+    if config.ckpt.resume:
+        load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
 
     perf_counter = PerfCounter(window_size=10)
 
@@ -227,6 +231,9 @@ def train(config: Config):
             wandb.log(metrics)
 
         logger.info(log)
+
+        if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
+            save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
         if training_progress.step > config.optim.total_steps:
             break
