@@ -98,21 +98,12 @@ def train(config: Config):
 
     tokenizer = get_tokenizer(config.data.fake, config.name_model, config.type_model)
 
-    train_dataloader = get_dataloader(
-        tokenizer=tokenizer,
-        world_size=world_info.world_size,
-        rank=world_info.rank,
-        batch_size=config.train.micro_bs,
-        data_config=config.data,
-    )
+    # fmt: skip
+    train_dataloader = get_dataloader(tokenizer=tokenizer,world_size=world_info.world_size,rank=world_info.rank,batch_size=config.train.micro_bs,data_config=config.data)  # fmt: skip
+
     train_dataloader_iterator = iter(train_dataloader)
 
-    model, model_config = get_model(
-        type_model=config.type_model,
-        name_model=config.name_model,
-        seq_length=config.data.seq_length,
-        vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
-    )
+    model, model_config = get_model(type_model=config.type_model,name_model=config.name_model,seq_length=config.data.seq_length,vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE)  # fmt: skip
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
@@ -127,20 +118,9 @@ def train(config: Config):
 
     apply_fsdp(model, config.train.reshard_after_forward)
 
-    optimizer = torch.optim.AdamW(
-        params=model.parameters(),
-        lr=config.optim.optim.lr,
-        weight_decay=config.optim.optim.weight_decay,
-        betas=(config.optim.optim.betas1, config.optim.optim.betas2),
-    )
+    optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
-    scheduler = get_scheduler(
-        sched_type=config.optim.sched_type,
-        optimizer=optimizer,
-        num_warmup_steps=config.optim.warmup_steps,
-        num_stable_steps=config.optim.stable_steps,
-        num_training_steps=config.optim.total_steps,
-    )
+    scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
 
     training_progress = TrainingProgress(total_tokens=0, step=0)
 
