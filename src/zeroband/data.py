@@ -16,6 +16,9 @@ from datasets import load_dataset_builder, BuilderConfig
 from pyarrow import parquet as pq
 from transformers import PreTrainedTokenizer
 
+from zeroband.utils import FakeTokenizer
+from transformers import AutoTokenizer
+
 
 TEST_VOCAB_SIZE = 1024
 
@@ -300,9 +303,7 @@ def get_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:
-        train_dataset = load_all_datasets(
-            data_config=data_config, split="train", tokenizer=tokenizer, rank=rank, world_size=world_size
-        )
+        train_dataset = load_all_datasets(data_config=data_config, split="train", tokenizer=tokenizer, rank=rank, world_size=world_size)
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
 
@@ -312,6 +313,18 @@ def get_dataloader(
         collate_fn=collate_fn,
         num_workers=data_config.num_workers,
     )
+
+
+def get_tokenizer(fake: bool, name_model: str, type_model: str) -> PreTrainedTokenizer:
+    # Load tokenizer
+    if fake and name_model == "debugmodel":
+        return FakeTokenizer()
+    elif type_model == "llama2":
+        return AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
+    elif type_model == "llama3":
+        return AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+    else:
+        raise ValueError(f"Model type {type_model} not supported")
 
 
 @functools.lru_cache(maxsize=None)
@@ -403,9 +416,7 @@ def load_all_datasets(
 ) -> InterleaveDataset:
     """Load all datasets and interleave them"""
 
-    if data_config.split_by_data_rank and (
-        data_config.data_rank is not None and data_config.data_world_size is not None
-    ):
+    if data_config.split_by_data_rank and (data_config.data_rank is not None and data_config.data_world_size is not None):
         split_rank = data_config.data_rank * world_size + rank
         split_world_size = data_config.data_world_size * world_size
     else:

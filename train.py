@@ -8,12 +8,11 @@ from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ig
 import wandb
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
-from zeroband.data import TEST_VOCAB_SIZE, DataConfig, get_dataloader
+from zeroband.data import TEST_VOCAB_SIZE, DataConfig, get_dataloader, get_tokenizer
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.utils import (
-    FakeTokenizer,
     PerfCounter,
     get_peak_flops,
     get_num_params,
@@ -22,7 +21,6 @@ from zeroband.utils import (
 )
 from zeroband.logger import get_logger
 
-from transformers import AutoTokenizer
 from pydantic_config import BaseConfig, parse_argv
 import torch.nn.functional as F
 
@@ -73,25 +71,32 @@ class Config(BaseConfig):
     train: TrainConfig
 
 
+def get_gradient_accumulation_steps(batch_size: int, micro_bs: int) -> int:
+    assert batch_size % world_info.local_world_size == 0
+    batch_size = batch_size // world_info.local_world_size
+
+    assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})."
+    return batch_size // micro_bs
+
+
+def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
+
+    for layer_id, transformer_block in model.layers.items():
+        if reshard_after_forward:
+            reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        else:
+            reshard_after_forward = False
+        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
+    fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
+
+
 def train(config: Config):
     # batch_size is the total batch size for all GPUs
-    assert config.optim.batch_size % world_info.local_world_size == 0
-    batch_size = config.optim.batch_size // world_info.local_world_size
 
-    assert batch_size % config.train.micro_bs == 0, (
-        f"The micro batch size ({config.train.micro_bs}) must divide the number of samples on each GPU ({batch_size})."
-    )
-    gradient_accumulation_steps = batch_size // config.train.micro_bs
+    gradient_accumulation_steps = get_gradient_accumulation_steps(config.optim.batch_size, config.train.micro_bs)
 
-    # Load tokenizer
-    if config.data.fake and config.name_model == "debugmodel":
-        tokenizer = FakeTokenizer()
-    elif config.type_model == "llama2":
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif config.type_model == "llama3":
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
-    else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+    tokenizer = get_tokenizer(config.data.fake, config.name_model, config.type_model)
 
     train_dataloader = get_dataloader(
         tokenizer=tokenizer,
@@ -114,25 +119,13 @@ def train(config: Config):
 
     num_params = get_num_params(model, exclude_embedding=True)
     logger.info(f"Number of parameters: {num_params}")
-    num_flop_per_token = get_num_flop_per_token(
-        num_params,
-        model_config,
-        config.data.seq_length,
-    )
+    num_flop_per_token = get_num_flop_per_token(num_params, model_config, config.data.seq_length)
 
     if config.train.ac_ckpt:
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
-
-    for layer_id, transformer_block in model.layers.items():
-        if config.train.reshard_after_forward:
-            reshard_after_forward = int(layer_id) < len(model.layers) - 1
-        else:
-            reshard_after_forward = False
-        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
-    fully_shard(model, mp_policy=mp_policy, reshard_after_forward=config.train.reshard_after_forward)
+    apply_fsdp(model, config.train.reshard_after_forward)
 
     optimizer = torch.optim.AdamW(
         params=model.parameters(),
