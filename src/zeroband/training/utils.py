@@ -5,6 +5,7 @@ import time
 import torch
 from transformers import (
     LlamaConfig,
+    LlamaForCausalLM,
 )
 
 
@@ -78,10 +79,15 @@ class PerfCounter:
     we use a rollowing window because time perf counter is not precise enough in some case
     """
 
-    def __init__(self, window_size: int):
+    def __init__(self, window_size: int, model: LlamaForCausalLM, seq_len: int):
         self.window_size = window_size
         self.tokens = []
         self.times = []
+        self.model = model
+
+        self.gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
+        self.num_params = get_num_params(model, exclude_embedding=True)
+        self.num_flop_per_token = get_num_flop_per_token(self.num_params, model.config, seq_len=seq_len)
 
     def count_tokens(self, tokens: int):
         self.tokens.append(tokens)
@@ -94,6 +100,12 @@ class PerfCounter:
         if len(self.tokens) < 2:
             return None
         return sum(self.tokens[1:]) / (self.times[-1] - self.times[0])
+
+    def get_mfu(self) -> float | None:
+        tokens_per_second = self.get_tokens_per_second()
+        if tokens_per_second is None:
+            return None
+        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops
 
 
 def get_random_available_port_list(num_port):

@@ -14,9 +14,6 @@ from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import (
     PerfCounter,
-    get_peak_flops,
-    get_num_params,
-    get_num_flop_per_token,
     apply_ac_ckpt,
 )
 from zeroband.logger import get_logger
@@ -101,13 +98,6 @@ def train(config: Config):
 
     train_dataloader_iterator = iter(train_dataloader)
 
-    gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
-    logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
-
-    num_params = get_num_params(model, exclude_embedding=True)
-    logger.info(f"Number of parameters: {num_params}")
-    num_flop_per_token = get_num_flop_per_token(num_params, model_config, config.data.seq_length)
-
     if config.train.ac_ckpt:
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
@@ -129,7 +119,7 @@ def train(config: Config):
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
 
-    perf_counter = PerfCounter(window_size=10)
+    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
 
     while True:
         loss_batch = 0
@@ -186,7 +176,7 @@ def train(config: Config):
         tokens_per_second = perf_counter.get_tokens_per_second()
         if tokens_per_second is not None:
             metrics["tokens_per_second"] = tokens_per_second
-            metrics["mfu"] = 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
+            metrics["mfu"] = perf_counter.get_mfu()
             log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
         if world_info.rank == 0 and config.wandb:
