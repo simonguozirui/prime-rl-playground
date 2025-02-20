@@ -12,10 +12,8 @@ from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
-from zeroband.training.utils import (
-    PerfCounter,
-    apply_ac_ckpt,
-)
+from zeroband.training.utils import PerfCounter, apply_ac_ckpt
+
 from zeroband.logger import get_logger
 
 from pydantic_config import BaseConfig, parse_argv
