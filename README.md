@@ -5,7 +5,7 @@ fork of prime to add RL training at scale. Private for now
 
 quick install
 ```
-curl -sSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime-rl/main/scripts/install/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime-rl/main/install.sh | bash
 ```
 
 
