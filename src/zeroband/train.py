@@ -90,7 +90,7 @@ def train(config: Config):
 
     gradient_accumulation_steps = get_gradient_accumulation_steps(config.optim.batch_size, config.train.micro_bs)
 
-    model, model_config, tokenizer = get_model_and_tokenizer(config.name_model)
+    model, tokenizer = get_model_and_tokenizer(config.name_model)
 
     train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
 
