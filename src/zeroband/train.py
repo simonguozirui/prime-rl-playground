@@ -161,15 +161,7 @@ def train(config: Config):
         perf_counter.count_tokens(new_tokens)
         training_progress.total_tokens += new_tokens
 
-        metrics = {
-            "Loss": loss_batch.item(),
-            "step": training_progress.step,
-            "inner_lr": inner_lr,
-            "Perplexity": torch.exp(loss_batch).item(),
-            "total_tokens": training_progress.total_tokens,
-            "time": time.time(),
-            "grad_norm": grad_norm.item(),
-        }
+        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item()}  # fmt: skip
 
         log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 
