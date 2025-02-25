@@ -2,6 +2,7 @@ import os
 import time
 from typing import TYPE_CHECKING, Literal
 
+from pydantic import model_validator
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
@@ -64,12 +65,26 @@ class Config(BaseConfig):
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
 
+    @model_validator(mode="after")
+    def check_batch_size(self):
+        if self.data.batch_size is None:
+            self.data.batch_size = self.optim.batch_size
+        assert self.optim.batch_size == self.data.batch_size, (
+            "The batch size in the config must be the same as the batch size in the data config."
+        )
+        return self
 
-def get_gradient_accumulation_steps(batch_size: int, micro_bs: int) -> int:
+
+def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int) -> int:
     assert batch_size % world_info.local_world_size == 0
     batch_size = batch_size // world_info.local_world_size
 
     assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})."
+
+    assert batch_size % (data_workers * world_info.local_world_size) == 0, (
+        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers}) times the number of GPUs ({world_info.local_world_size})."
+    )
+
     return batch_size // micro_bs
 
 
@@ -88,7 +103,7 @@ def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
 def train(config: Config):
     # batch_size is the total batch size for all GPUs
 
-    gradient_accumulation_steps = get_gradient_accumulation_steps(config.optim.batch_size, config.train.micro_bs)
+    gradient_accumulation_steps = get_gradient_accumulation_steps(config.optim.batch_size, config.train.micro_bs, config.data.num_workers)
 
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 
@@ -130,12 +145,13 @@ def train(config: Config):
             batch = next(train_dataloader_iterator)
 
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
-            advantages: Float[torch.Tensor, "batch"] = batch["advantages"].to("cuda")
-            ref_logprobs: Float[torch.Tensor, "batch seq"] = batch["ref_logprobs"].to("cuda")
+            advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
 
-            policy_logprobs = model(input_ids=input_ids).logits.contiguous()
+            policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+            ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
             loss = grpo_loss(policy_logprobs, ref_logprobs, advantages) / gradient_accumulation_steps
+            # loss = policy_logprobs.sum() / gradient_accumulation_steps
 
             loss.backward()
             loss_batch += loss.detach().clone()
