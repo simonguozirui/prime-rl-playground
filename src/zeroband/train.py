@@ -3,7 +3,6 @@ from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import model_validator
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
@@ -41,6 +40,8 @@ class OptimConfig(BaseConfig):
     total_steps: int = 88_000
     batch_size: int = 512
 
+    step_per_rollout: int = 1
+
 
 class TrainConfig(BaseConfig):
     micro_bs: int = 1
@@ -71,24 +72,16 @@ class Config(BaseConfig):
 
     gpus_ids: list[int] | None = None
 
-    @model_validator(mode="after")
-    def check_batch_size(self):
-        if self.data.batch_size is None:
-            self.data.batch_size = self.optim.batch_size
-        assert self.optim.batch_size == self.data.batch_size, (
-            "The batch size in the config must be the same as the batch size in the data config."
-        )
-        return self
-
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
     assert batch_size % world_info.world_size == 0
     batch_size = batch_size // world_info.world_size
 
-    assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})."
+    print(f"batch_size: {batch_size}, micro_bs: {micro_bs}, data_workers: {data_workers}")
+    assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
 
-    assert batch_size % (data_workers * world_info.world_size) == 0, (
-        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers}) times the number of GPUs ({world_info.world_size})."
+    assert batch_size % data_workers == 0, (
+        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers})."
     )
 
     return batch_size // micro_bs
@@ -141,7 +134,12 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 
-    train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
+    train_dataloader = get_dataloader(
+        tokenizer=tokenizer,
+        micro_batch_size=config.train.micro_bs,
+        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
+        data_config=config.data,
+    )
 
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -174,7 +172,7 @@ def train(config: Config):
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            model.set_requires_gradient_sync(not is_accumulating) # no sync if we are accumulating gradients
+            model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
             # Load args
             batch = next(train_dataloader_iterator)
@@ -237,8 +235,9 @@ def train(config: Config):
         if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
-        if config.ckpt.rollout_path is not None:
-            path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
+        if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
+            step_per_rollout = training_progress.step // config.optim.step_per_rollout
+            path = Path(config.ckpt.rollout_path) / f"step_{step_per_rollout}"
             save_ckpt_for_rollout(model, path)
 
         if training_progress.step >= config.optim.total_steps:
