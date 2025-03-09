@@ -9,7 +9,7 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 import wandb
 
 
-from zeroband.models import ModelName, ModelType, get_model_and_tokenizer
+from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss
@@ -48,6 +48,8 @@ class TrainConfig(BaseConfig):
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
     torch_compile: bool = True
+
+    attn_impl: AttnImpl = "flex_attention"
 
 
 class CkptConfig(BaseConfig):
@@ -132,7 +134,7 @@ def train(config: Config):
         config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
     )
 
-    model, tokenizer = get_model_and_tokenizer(config.name_model)
+    model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
     train_dataloader = get_dataloader(
         tokenizer=tokenizer,
