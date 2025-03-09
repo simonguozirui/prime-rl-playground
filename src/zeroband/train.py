@@ -23,6 +23,9 @@ from jaxtyping import Float, Int
 
 from zeroband.training.world_info import WorldInfo, get_world_info
 
+from torch._guards import log as torch_log
+import logging
+
 
 class AdamConfig(BaseConfig):
     type: Literal["adam"] = "adam"
@@ -115,6 +118,10 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
 
 def train(config: Config):
+    if "ZERO_BAND_DEV" not in os.environ:
+        torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
+        torch_log.setLevel(logging.CRITICAL)  #
+
     logger = get_logger()
     world_info = get_world_info()
 
