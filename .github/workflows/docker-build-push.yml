@@ -57,7 +57,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
 
       - name: Test import
-        run: docker run --entrypoint python primerl-slim -c "import zeroband.inference"
+        run: docker run --entrypoint python primeintellect/prime-rl:main -c "import zeroband.inference"
 
       - name: Image digest
         run: echo ${{ steps.docker_build.outputs.digest }}
