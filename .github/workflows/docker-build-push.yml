@@ -7,7 +7,7 @@ on:
     - '*'
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: xl-runner
     steps:
       - name: Remove unnecessary packages
         run: |
