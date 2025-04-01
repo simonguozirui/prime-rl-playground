@@ -282,7 +282,7 @@ def train(config: Config):
                 rewards_token_count += rewards.numel()
 
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
-                clip_seq_lens += (batch["seq_lens"] == config.data.seq_length).sum() / gradient_accumulation_steps
+                clip_seq_lens += (batch["seq_lens"] >= config.data.seq_length).sum() / gradient_accumulation_steps
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
