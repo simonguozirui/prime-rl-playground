@@ -128,7 +128,7 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool):
-    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32)
 
     for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
@@ -431,9 +431,10 @@ def train(config: Config):
                 )
                 save_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.path)
 
+        time_rollout_step = time.time() - time_start
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
-            wandb.log({"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time.time() - time_start})
+            wandb.log({"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step})
 
         if training_progress.step >= config.optim.total_steps:
             break
