@@ -1,4 +1,5 @@
 from functools import lru_cache
+import requests
 import os
 import asyncio
 import json
@@ -59,6 +60,7 @@ class Config(BaseConfig):
     output_path: str = "outputs"
     total_step: int | None = None
     rollout_path: str | None = None
+    step_endpoint: str | None = None
 
     quant: Literal["fp8"] | None = None
 
@@ -370,15 +372,26 @@ def inference(config: Config):
         ckpt_step = 0
         real_step = 0
 
+    # This is used by the seeding logic to make sure we dont generate the same samples twice if we do multiple batches for a step
+    current_step_batch_counter = 1
     total_problems = 0
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
+        if config.step_endpoint is not None:
+            # We get the step from the endpoint at the start of each batch to know what to work on
+            new_real_step = requests.get(config.step_endpoint).json()
+            if new_real_step != real_step:
+                real_step = new_real_step
+                current_step_batch_counter = 1
+            else:
+                current_step_batch_counter += 1
+
         logger.info(
             f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.async_level: {config.async_level}"
         )
         if config.rollout_path is not None and real_step - ckpt_step > config.async_level:
-            ckpt_step += 1
+            ckpt_step = real_step - config.async_level
             attempt_count = 0
             while True:
                 stable_file = Path(config.rollout_path) / f"step_{ckpt_step}/stable"
@@ -401,7 +414,7 @@ def inference(config: Config):
 
             # We reseed the generator here to make the sampling reproducible at each step.
             # This would work even if the node restarts and resumes from the current step.
-            generator = np.random.default_rng(node_address_int + real_step)
+            generator = np.random.default_rng(node_address_int * current_step_batch_counter + real_step)
             indexes = generator.integers(0, len(dataset), config.batch_size)
             batch = dataset.select(indexes)
         else:
@@ -549,6 +562,12 @@ if __name__ == "__main__":
     mp.set_start_method("spawn")
     config = Config(**parse_argv())  # type: ignore
 
+    if config.step_endpoint is not None:
+        current_step = requests.get(config.step_endpoint).json()
+        logger = get_logger("PRE-INFERENCE")
+        logger.info(f"Current step: {current_step}")
+        assert isinstance(current_step, int), "Current step must be an integer"
+
     # Maybe start shardcast downloader
     from zeroband.inferencing import envs as inference_envs
 
@@ -559,7 +578,9 @@ if __name__ == "__main__":
             inference_envs.SHARDCAST_SERVERS,
             config.rollout_path,
             config.async_level + 1,
-            inference_envs.SHARDCAST_BACKLOG_VERSION,
+            # TODO: maybe +1 because we most likely wont download the current step in time?
+            # We could deadlock though.
+            max(current_step - config.async_level, 1),
         )
     else:
         shardcast_process = None
