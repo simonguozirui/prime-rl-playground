@@ -91,7 +91,7 @@ class Config(BaseConfig):
     async_level: int = 2  # the amount of step for which we can be in advance
 
     # mutli gpu
-    tp: int = 1
+    tp: int | Literal["auto"] = 1
     dp: int = 1
     gpus_ids: list[int] | None = None
     prime_log_freq: int | None = None
@@ -345,6 +345,7 @@ def inference(config: Config):
     tokenizer = llm.get_tokenizer()
     rank = int(os.environ.get("RANK", "0"))
     logger = get_logger(f"INFERENCE {rank}")
+
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
     if os.environ.get("NODE_ADDRESS") is not None:
@@ -594,6 +595,11 @@ def inference_run(config: Config) -> list[mp.Process]:
 
         gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
 
+        if config.tp == "auto":
+            assert len(gpus_ids) % config.dp == 0, "Number of GPUs must be divisible by dp when using tp=auto"
+            config.tp = len(gpus_ids) // config.dp
+            get_logger("PRE-INFERENCE").info(f"AUTO gpu config: now using {config.tp} GPUs for tp")
+
         assert len(gpus_ids) % (config.dp * config.tp) == 0, "Number of GPUs must be divisible by dp * tp"
 
         num_process = len(gpus_ids) // config.tp
@@ -605,6 +611,10 @@ def inference_run(config: Config) -> list[mp.Process]:
         return processes
 
     else:
+        if config.tp == "auto":
+            config.tp = torch.cuda.device_count()
+            get_logger("PRE-INFERENCE").info(f"AUTO gpu config: now using all {config.tp} GPUs for tp")
+
         inference(config)
         return []
 
