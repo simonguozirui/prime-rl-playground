@@ -19,8 +19,15 @@ def _test_torchrun(num_gpus, config, extra_args=[]):
 
 @pytest.mark.parametrize("num_gpus", [1, 2])
 @pytest.mark.parametrize("collate_mode", ["packing", "padding", "balancing"])
-def test_train(num_gpus, collate_mode):
-    _test_torchrun(num_gpus=num_gpus, config="debug.toml", extra_args=["--collate_mode", collate_mode])
+@pytest.mark.parametrize("kl_coef", [None, 0.02])
+def test_train(num_gpus, collate_mode, kl_coef):
+    extra_args = []
+    if collate_mode == "packing":
+        extra_args.append("--collate_mode")
+    if kl_coef is not None:
+        extra_args.append("--kl_coef")
+        extra_args.append(str(kl_coef))
+    _test_torchrun(num_gpus=num_gpus, config="debug.toml", extra_args=extra_args)
 
 
 def test_train_with_rollout_file(fake_rollout_files_dir):
