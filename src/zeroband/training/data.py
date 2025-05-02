@@ -14,9 +14,9 @@ from jaxtyping import Float, Int
 from pyarrow import dataset as ds
 import pyarrow.parquet as pq
 
-from zeroband.logger import get_logger
+from zeroband.utils.logger import get_logger
 from zeroband.training.data_prefetch import GCPPrefetcher, STABLE_FILE
-from zeroband.training.world_info import get_world_info
+from zeroband.utils.world_info import get_world_info
 from zeroband.training import envs
 from zeroband.schema import pa_schema
 
@@ -95,7 +95,7 @@ def _get_dataset_from_files_step(
     step_count: int, path: Path, timeout: float, batch_size: int, ignore_zero_advantages: bool, use_stable_file: bool
 ) -> ds.Dataset:
     """Get all the files for a given step. Waits until the step is created which is indicated by the stable file."""
-    logger = get_logger()
+    logger = get_logger("TRAIN")
     step_path = path / f"step_{step_count}"
 
     start_time = time.time()
@@ -204,7 +204,7 @@ class ParquetDataset(IterableDataset):
         pq_read_bs: int = 64,
         use_stable_file: bool = False,
     ):
-        self._logger = get_logger()
+        self._logger = get_logger("TRAIN")
         self._path = path
         self._batch_size = batch_size
         self._pq_read_bs = pq_read_bs
