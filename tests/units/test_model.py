@@ -1,12 +1,21 @@
-from zeroband.utils.models import get_model_and_tokenizer
-
 import torch
-
 import pytest
 
+from zeroband.utils.models import get_model_and_tokenizer
 
-def test_model():
-    model, tokenizer = get_model_and_tokenizer("PrimeIntellect/llama-2m-fresh", "flash_attention_2")
+
+@pytest.fixture(params=["eager", "sdpa", "flash_attention_2"], scope="session")
+def attention_impl(request):
+    try:
+        # ruff: noqa: F401
+        import flash_attn
+    except ImportError:
+        pytest.skip("Flash Attention not available")
+    return request.param
+
+
+def test_model(attention_impl):
+    model, tokenizer = get_model_and_tokenizer("PrimeIntellect/llama-2m-fresh", attention_impl)
     assert model is not None
 
     BS = 2
@@ -22,8 +31,8 @@ def test_model():
         assert outputs.shape == (BS, SEQ_LEN, len(tokenizer))
 
 
-def test_model_with_position_ids():
-    model, tokenizer = get_model_and_tokenizer("PrimeIntellect/llama-2m-fresh", "flash_attention_2")
+def test_model_with_position_ids(attention_impl):
+    model, tokenizer = get_model_and_tokenizer("PrimeIntellect/llama-2m-fresh", attention_impl)
     assert model is not None
 
     BS = 2
@@ -41,7 +50,7 @@ def test_model_with_position_ids():
 
 
 @pytest.mark.parametrize("correct_position_ids", [True, False])
-def test_model_with_sequence_packing(correct_position_ids):
+def test_model_with_sequence_packing(attention_impl, correct_position_ids):
     """
     The goal of this test is to check that the sequence packing works correctly.
 
@@ -50,8 +59,10 @@ def test_model_with_sequence_packing(correct_position_ids):
     [B, seq]  and doing [1, B*seq] with the proper masking.
 
     """
+    if attention_impl != "flash_attention_2":
+        pytest.skip("Test only works with flash attention")
 
-    model, tokenizer = get_model_and_tokenizer("PrimeIntellect/llama-2m-fresh", "flash_attention_2")
+    model, tokenizer = get_model_and_tokenizer("PrimeIntellect/llama-2m-fresh", attention_impl)
     assert model is not None
 
     model = model.to("cuda")
