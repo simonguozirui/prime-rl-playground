@@ -24,7 +24,7 @@ from vllm.model_executor.layers.logits_processor import _prune_hidden_states
 
 from zeroband.utils.logger import get_logger
 from zeroband.utils.world_info import get_world_info
-from zeroband.models import ModelName
+from zeroband.utils.models import ModelName
 from zeroband.rewards.registry import REWARD_FUNCTIONS
 
 from datasets import load_dataset
@@ -32,10 +32,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import multiprocessing as mp
 
-from zeroband.inferencing.toploc import TopLocCache
+from zeroband.inference.toploc import TopLocCache
 from zeroband.training.mp import EnvWrapper, cuda_available_devices
-from zeroband.prime_metrics import PrimeMetric
-from zeroband.schema import pa_schema
+from zeroband.utils.metrics import PrimeMetric
+from zeroband.inference.schema import pa_schema
+
+from zeroband.inference import envs
 
 
 class SamplingParamConfig(BaseConfig):
@@ -363,12 +365,12 @@ def inference(config: Config):
     dataset = load_dataset(config.dataset, split="train")
 
     # Optionally shuffle dataset
-    if os.environ.get("NODE_ADDRESS") is not None:
+    if envs.NODE_ADDRESS is not None:
         # We dont shuffle here because we shuffle reproducibly in the sampling loop.
         assert config.seed is None, "Seed is not supported when NODE_ADDRESS is set"
         assert world_info.rank == 0, "DP is not supported when NODE_ADDRESS is set"
-        node_address_int = int(os.environ.get("NODE_ADDRESS"), 16)
-        logger.info(f"Seeding with {node_address_int} ({os.environ.get('NODE_ADDRESS')})")
+        node_address_int = int(envs.NODE_ADDRESS, 16)
+        logger.info(f"Seeding with {node_address_int} ({envs.NODE_ADDRESS})")
     else:
         # Seed the dataset with a random number
         # TODO(Mika): This breaks PP because shards load different batches
@@ -665,10 +667,10 @@ if __name__ == "__main__":
         assert isinstance(current_step, int), "Current step must be an integer"
 
     # Maybe start shardcast downloader
-    from zeroband.inferencing import envs as inference_envs
+    from zeroband.inference import envs as inference_envs
 
     if inference_envs.SHARDCAST_SERVERS is not None:
-        from zeroband.inferencing.shardcast_downloader import run_main_bg
+        from zeroband.inference.shardcast_downloader import run_main_bg
 
         shardcast_process = run_main_bg(
             inference_envs.SHARDCAST_SERVERS,
