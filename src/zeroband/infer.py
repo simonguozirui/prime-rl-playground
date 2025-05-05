@@ -76,7 +76,7 @@ class DifficultyFilteringConfig(BaseConfig):
 
 
 class Config(BaseConfig):
-    name_model: ModelName = "150M"
+    model_name: ModelName = "150M"
     dataset: str = "justus27/rl-code-and-math"
     batch_size: int = 32
     max_samples: int | None = None
@@ -84,6 +84,7 @@ class Config(BaseConfig):
     total_step: int | None = None
     rollout_path: str | None = None
     step_endpoint: str | None = None
+    download_dir: str | None = None
 
     quant: Literal["fp8"] | None = None
 
@@ -347,13 +348,14 @@ def inference(config: Config):
 
     # Initialize vLLM and get tokenizer
     llm = LLM(
-        model=config.name_model,
+        model=config.model_name,
         tensor_parallel_size=config.tp,
         max_seq_len_to_capture=config.max_model_len,
         max_model_len=config.max_model_len,
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
         disable_async_output_proc=True,  # We have an off by 1 error in toploc without this flag when cuda graph padding is enabled.
+        download_dir=config.download_dir,
         dtype="bfloat16" if config.dtype == "bf16" else torch.float32,
     )
     tokenizer = llm.get_tokenizer()
@@ -516,7 +518,7 @@ def inference(config: Config):
 
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
-            if config.name_model != "Qwen/QwQ-32B":
+            if config.model_name != "Qwen/QwQ-32B":
                 for i, p in enumerate(prompts):
                     prompts[i] = p.replace("<｜begin▁of▁sentence｜>", "")
         else:
