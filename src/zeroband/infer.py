@@ -9,6 +9,7 @@ import uuid
 import numpy as np
 import torch
 from vllm import LLM, SamplingParams
+from pydantic import model_validator
 from pydantic_config import BaseConfig, parse_argv
 import vllm
 import concurrent.futures
@@ -19,12 +20,11 @@ from safetensors import safe_open
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
 from vllm.sequence import SampleLogprobs
-from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.logits_processor import _prune_hidden_states
 
 from zeroband.utils.logger import get_logger
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.models import ModelName
+from zeroband.inference.toploc import setup_toploc_cache
 from zeroband.rewards.registry import REWARD_FUNCTIONS
 
 from datasets import load_dataset
@@ -32,7 +32,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import multiprocessing as mp
 
-from zeroband.inference.toploc import TopLocCache
 from zeroband.training.mp import EnvWrapper, cuda_available_devices
 from zeroband.utils.metrics import PrimeMetric
 from zeroband.inference.schema import pa_schema
@@ -110,6 +109,12 @@ class Config(BaseConfig):
 
     len_reward: LenRewardConfig | None = None
     difficulty_filtering: DifficultyFilteringConfig | None = None
+
+    @model_validator(mode="after")
+    def disable_toploc_for_fp32(self):
+        if self.dtype == "fp32":
+            self.toploc = False
+        return self
 
 
 def fake_chat_template(messages):
@@ -388,37 +393,13 @@ def inference(config: Config):
             and x[config.difficulty_filtering.solve_rate_field] <= config.difficulty_filtering.max_solve_rate
         )
 
-    # Initialize TOPLOC cache
-    if config.dtype == "fp32":
-        config.toploc = False
-
-    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    toploc_cache = TopLocCache(
-        max_seqs=config.batch_size * config.sampling.n,
-        max_len=32,
-        hidden_size=model.config.hidden_size,
+    # Setup TOPLOC
+    toploc_cache, _ = setup_toploc_cache(
+        llm,
         disable=not config.toploc,
+        max_seqs=config.batch_size * config.sampling.n,
+        hidden_size=llm.llm_engine.model_executor.driver_worker.model_runner.model.config.hidden_size,
     )
-
-    # Register logits processor hook
-    # TODO: Can we move this to toploc submodule?
-    def logits_processor_hook(module, input):
-        hidden_states, sampling_metadata = input[1], input[2]
-        assert isinstance(hidden_states, torch.Tensor)
-        assert isinstance(sampling_metadata, SamplingMetadata)
-        # This check is true only for prefills
-        if max(sampling_metadata.selected_token_indices) > len(sampling_metadata.seq_groups):
-            return
-        # This pruning is required when cuda graph padding is enabled.
-        hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
-        if len(sampling_metadata.seq_groups) != hidden_states.shape[0]:
-            raise ValueError(f"Lengths dont match: {len(sampling_metadata.seq_groups)} {hidden_states.shape}")
-
-        index = [i.seq_ids[0] for i in sampling_metadata.seq_groups]
-        toploc_cache.add(index, hidden_states)
-
-    if not toploc_cache.disable:
-        model.logits_processor.register_forward_pre_hook(logits_processor_hook)
 
     if config.ckpt_start_path is not None:
         path = Path(config.ckpt_start_path)
