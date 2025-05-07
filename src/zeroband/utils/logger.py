@@ -1,47 +1,53 @@
 import logging
 from logging import Logger, Formatter
+from typing import Literal
 
-from zeroband.utils.world_info import get_world_info, WorldInfo
 from zeroband.utils import envs
+from zeroband.utils.world_info import get_world_info, WorldInfo
 
 
 class PrimeFormatter(Formatter):
-    def __init__(self, world_info: WorldInfo):
+    def __init__(self, world_info: WorldInfo | None = None):
         super().__init__()
         self.world_info = world_info
 
     def format(self, record):
-        record.local_rank = self.world_info.local_rank
-        log_format = "{asctime} [{name}] [{levelname}] [Rank {local_rank}] {message}"
+        if self.world_info is not None:
+            record.rank = self.world_info.rank
+            log_format = "{asctime} [{name}] [Rank {rank}] [{levelname}] [{filename}:{lineno}] {message}"
+        else:
+            log_format = "{asctime} [{name}] [{levelname}] {message}"
         formatter = logging.Formatter(log_format, style="{", datefmt="%m-%d %H:%M:%S")
         return formatter.format(record)
 
 
 ALLOWED_LEVELS = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "CRITICAL": logging.CRITICAL}
+LoggerName = Literal["INFER", "TRAIN"]
 
 
-def get_logger(name: str) -> Logger:
+def get_logger(name: LoggerName) -> Logger:
     # Get logger from Python's built-in registry
     logger = logging.getLogger(name)
 
     # Only configure the logger if it hasn't been configured yet
     if not logger.handlers:
-        # Get world info (will instantiate if not already)
-        world_info = get_world_info()
-
-        # Set log level
-        if world_info.local_rank == 0:
-            # On first rank, set log level from env var
-            level = envs.PRIME_LOG_LEVEL
-            logger.setLevel(ALLOWED_LEVELS.get(level.upper(), logging.INFO))
+        level = envs.PRIME_LOG_LEVEL
+        world_info = None
+        if name == "TRAIN":
+            world_info = get_world_info()
+            if world_info.local_rank == 0:
+                # On first rank, set log level from env var
+                logger.setLevel(ALLOWED_LEVELS.get(level.upper(), logging.INFO))
+            else:
+                # Else, only log critical messages
+                logger.setLevel(logging.CRITICAL)
         else:
-            # Else, only log critical messages by default
-            logger.setLevel(logging.CRITICAL)
+            # Set log level
+            logger.setLevel(ALLOWED_LEVELS.get(level.upper(), logging.INFO))
 
         # Add handler with custom formatter
         handler = logging.StreamHandler()
-        formatter = PrimeFormatter(world_info)
-        handler.setFormatter(formatter)
+        handler.setFormatter(PrimeFormatter(world_info=world_info))
         logger.addHandler(handler)
 
         # Prevent the log messages from being propagated to the root logger
@@ -50,12 +56,6 @@ def get_logger(name: str) -> Logger:
     return logger
 
 
-def reset_logger(name: str) -> None:
+def reset_logger(name: str | None = None) -> None:
     logger = logging.getLogger(name)
     logger.handlers.clear()
-
-
-if __name__ == "__main__":
-    logger = get_logger("TEST")
-    logger.info(f"Hi from logger {logger.name}")
-    logger.debug("I cannot see this.")
