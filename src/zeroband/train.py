@@ -70,7 +70,7 @@ class TrainConfig(BaseConfig):
     torch_compile: bool = False  #  disabling torch compile because its too unstable for RL
     liger_qwen: bool = False
 
-    attn_impl: AttnImpl = "flex_attention"
+    attn_impl: AttnImpl = "flash_attention_2"
 
 
 class CkptConfig(BaseConfig):
@@ -88,7 +88,7 @@ class CkptConfig(BaseConfig):
 
 
 class Config(BaseConfig):
-    model_name: ModelName = "PrimeIntellect/llama-150m-fresh"
+    model_name: ModelName
 
     ckpt: CkptConfig = CkptConfig()
 
@@ -178,7 +178,6 @@ def get_logprobs(model: ModelType, input_ids: torch.Tensor, position_ids: torch.
 
 def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
-        torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
         torch_log.setLevel(logging.CRITICAL)
 
     logger = get_logger("TRAIN")
