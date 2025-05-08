@@ -1,8 +1,5 @@
-from functools import lru_cache
 import requests
 import os
-import asyncio
-import json
 from pathlib import Path
 from typing import Literal
 import uuid
@@ -12,11 +9,11 @@ from vllm import LLM, SamplingParams
 from pydantic import model_validator
 from pydantic_config import BaseConfig, parse_argv
 import vllm
-import concurrent.futures
 import time
 from toploc.utils import sha256sum
 from safetensors import safe_open
 import torch.distributed as dist
+import json
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
@@ -27,7 +24,7 @@ from zeroband.utils.logger import get_logger
 from zeroband.utils.models import ModelName
 from zeroband.inference.toploc import setup_toploc_cache
 from zeroband.inference.pipeline import PipelineConfig, setup_pipeline
-from zeroband.rewards.registry import REWARD_FUNCTIONS
+from zeroband.inference.rewards import LenRewardsConfig, compute_rewards
 
 
 from datasets import load_dataset
@@ -53,25 +50,6 @@ class SamplingParamConfig(BaseConfig):
     n: int = 8
     logprobs: int = 0  # 0 mean 1 logprob here
     top_k: int = -1
-
-
-class LenRewardConfig(BaseConfig):
-    reward_type: Literal["exact", "max", "clip"] = "max"
-    target_length_sampling: Literal["discrete", "range"] = "discrete"
-    length_prompt_location: Literal["system_prompt", "instruction"] = "system_prompt"
-
-    # applicable if target_length_sampling == "range"
-    min_length: int = 1000
-    max_length: int = 24000
-
-    # applicable if target_length_sampling == "discrete"
-    target_lengths: list[float] = [500, 1000, 2000, 3000]
-
-    # applicable for reward_type max and exact
-    reward_coef: float = 0.0003
-
-    # only applicable for reward_type == "max"
-    max_reward_delta: float = 0.5
 
 
 class DifficultyFilteringConfig(BaseConfig):
@@ -115,7 +93,7 @@ class Config(BaseConfig):
 
     toploc: bool = False
 
-    len_reward: LenRewardConfig | None = None
+    len_reward: LenRewardsConfig | None = None
     difficulty_filtering: DifficultyFilteringConfig | None = None
 
     @model_validator(mode="after")
@@ -149,11 +127,6 @@ def fake_chat_template(messages):
         formatted_prompts.append(prompt.strip())
 
     return formatted_prompts
-
-
-@lru_cache(maxsize=1)
-def get_process_executor():
-    return concurrent.futures.ProcessPoolExecutor(max_workers=32)
 
 
 def get_own_logprobs(sample_logprobs: SampleLogprobs) -> float:
@@ -193,11 +166,12 @@ def get_parquet_table(
 
     proof_iter = iter(proofs)
 
-    for i, (request, target_len) in enumerate(zip(generated_tokens, target_lengths)):
-        advantages = grouped_advantages[i]
-        rewards = grouped_rewards[i].tolist()
-        task_rewards = grouped_task_rewards[i].tolist()
-        length_penalties = grouped_length_penalties[i].tolist()
+    for request, target_len in zip(generated_tokens, target_lengths):
+        request_id = request.request_id
+        advantages = grouped_advantages[request_id]
+        rewards = grouped_rewards[request_id]
+        task_rewards = grouped_task_rewards[request_id]
+        length_penalties = grouped_length_penalties[request_id]
         for adv, reward, task_reward, length_penalty, output in zip(advantages, rewards, task_rewards, length_penalties, request.outputs):
             input_tokens_list.append(request.prompt_token_ids)
             output_tokens_list.append(output.token_ids)
@@ -271,92 +245,6 @@ def generate_target_length_prompts(config: Config, batch_size: int):
     max_word = " maximally " if config.len_reward.reward_type == "clip" else ""
 
     return [f"{prompt_prefix}Think for{max_word}{target} tokens before giving a response." for target in target_lengths], target_lengths
-
-
-async def compute_reward_for_output(output, verification_info, len_reward_config, task_type):
-    loop = asyncio.get_running_loop()
-    reward_fn = REWARD_FUNCTIONS[task_type]
-    task_reward = await loop.run_in_executor(get_process_executor(), reward_fn, output.text, verification_info)
-
-    total_reward = task_reward
-    length_penalty = 0
-    if verification_info["target_length"] > 0:
-        output_length = len(output.token_ids)
-        target_length = verification_info["target_length"]
-
-        if len_reward_config.reward_type == "exact":
-            length_penalty = abs(output_length - target_length)
-            length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
-            total_reward -= length_penalty
-
-        elif len_reward_config.reward_type == "max":
-            diff = target_length - output_length
-            length_penalty = torch.clip(
-                torch.tensor(len_reward_config.reward_coef * diff + len_reward_config.max_reward_delta), 0, 1
-            ).item()
-            total_reward *= length_penalty
-
-        elif len_reward_config.reward_type == "clip":
-            length_penalty = int(output_length > target_length)
-
-            if length_penalty == 1:
-                total_reward = 0
-
-    return dict(total_reward=total_reward, task_reward=task_reward, length_penalty=length_penalty)
-
-
-async def compute_rewards_async(
-    generated_tokens: list[vllm.RequestOutput],
-    verification_infos: list[str],
-    target_lengths: list[int],
-    task_types: list[str],
-    config: Config,
-) -> tuple[dict[int, torch.FloatTensor], dict[int, torch.FloatTensor], dict[int, torch.FloatTensor]]:
-    parsed_infos = [json.loads(ver) for ver in verification_infos]
-
-    for info, target_len in zip(parsed_infos, target_lengths):
-        info["target_length"] = target_len
-
-    tasks = []
-    mapping = []
-
-    for req_idx, (request, verification_info, task_type) in enumerate(zip(generated_tokens, parsed_infos, task_types)):
-        for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.len_reward, task_type)))
-            mapping.append(req_idx)
-
-    all_results = await asyncio.gather(*tasks)
-
-    grouped_total_rewards = {}
-    grouped_task_rewards = {}
-    grouped_length_penalties = {}
-
-    for req_idx in set(mapping):
-        grouped_total_rewards[req_idx] = []
-        grouped_task_rewards[req_idx] = []
-        grouped_length_penalties[req_idx] = []
-
-    for req_idx, result in zip(mapping, all_results):
-        grouped_total_rewards[req_idx].append(result["total_reward"])
-        grouped_task_rewards[req_idx].append(result["task_reward"])
-        grouped_length_penalties[req_idx].append(result["length_penalty"])
-
-    for req_idx in grouped_total_rewards:
-        grouped_total_rewards[req_idx] = torch.FloatTensor(grouped_total_rewards[req_idx])
-        grouped_task_rewards[req_idx] = torch.FloatTensor(grouped_task_rewards[req_idx])
-        grouped_length_penalties[req_idx] = torch.FloatTensor(grouped_length_penalties[req_idx])
-
-    return grouped_total_rewards, grouped_task_rewards, grouped_length_penalties
-
-
-def compute_advantages_grpo(grouped_rewards: dict[int, dict[str, torch.FloatTensor]], epsilon: float = 1e-6) -> dict[int, list[float]]:
-    advantages = {}
-    for req_idx, rewards_tensor in grouped_rewards.items():
-        mean = torch.mean(rewards_tensor).item()
-        std_dev = torch.std(rewards_tensor).item()
-        normalized = ((rewards_tensor - mean) / (std_dev + epsilon)).tolist()
-        advantages[req_idx] = normalized
-    return advantages
 
 
 def inference(config: Config):
@@ -496,6 +384,11 @@ def inference(config: Config):
         messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
 
         length_prompt_additions, target_lengths = generate_target_length_prompts(config, len(batch))
+        # Assume verification_info is stored as a JSON string in the dataset.
+        verification_infos = [json.loads(item["verification_info"]) for item in batch]
+        for target_length, verification_info in zip(target_lengths, verification_infos):
+            verification_info["target_length"] = target_length
+        task_types = [item["task_type"] for item in batch]
 
         if config.len_reward:
             if config.len_reward.length_prompt_location == "system_prompt":
@@ -518,10 +411,6 @@ def inference(config: Config):
                 for item, length_prompt in zip(batch, length_prompt_additions)
             ]
 
-        # Assume verification_info is stored as a JSON string in the dataset.
-        verification_infos = [item["verification_info"] for item in batch]
-        task_types = [item["task_type"] for item in batch]
-
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
             if config.model_name != "Qwen/QwQ-32B":
@@ -530,27 +419,26 @@ def inference(config: Config):
         else:
             prompts = fake_chat_template(messages)
 
-
         start_time = time.time()
-        generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
+        request_outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
         end_time = time.time()
 
         # Dropping like this isnt ideal. But in practice, we shouldnt have any prompts that are too long.
-        generated_tokens = [req for req in generated_tokens if len(req.outputs[0].token_ids) > 0]
-        if len(generated_tokens) != len(prompts):
-            logger.warning(f"{len(prompts) - len(generated_tokens)} prompts were filtered out because they were too long")
+        request_outputs = [req for req in request_outputs if len(req.outputs[0].token_ids) > 0]
+        if len(request_outputs) != len(prompts):
+            logger.warning(f"{len(prompts) - len(request_outputs)} prompts were filtered out because they were too long")
 
         # This generates proofs for the remaining sequences that haven't reached max_len.
         # We call here to give time for the proofs to be generated non-blocking in the background.
         toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
 
         # Calculate tokens and throughput
-        batch_input_tokens = sum(len(req.prompt_token_ids) for req in generated_tokens)
-        batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in generated_tokens)
+        batch_input_tokens = sum(len(req.prompt_token_ids) for req in request_outputs)
+        batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in request_outputs)
         batch_total_tokens = batch_input_tokens + batch_output_tokens
         total_tokens += batch_total_tokens
 
-        avg_seq_length = batch_total_tokens / (len(generated_tokens) * config.sampling.n) if generated_tokens else 0
+        avg_seq_length = batch_total_tokens / (len(request_outputs) * config.sampling.n) if request_outputs else 0
 
         elapsed_time = end_time - start_time
         tokens_per_second = batch_total_tokens / elapsed_time if elapsed_time > 0 else 0
@@ -567,24 +455,19 @@ def inference(config: Config):
         proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
         toploc_cache.reset_cache()
 
-        start_reward_advantages = time.time()
-        # Compute rewards asynchronously, grouped as a dictionary.
-        grouped_rewards, grouped_task_rewards, grouped_length_penalties = asyncio.run(
-            compute_rewards_async(generated_tokens, verification_infos, target_lengths, task_types, config)
+        # Compute rewards and advantages
+        start = time.time()
+        rewards, task_rewards, length_penalties, advantages = compute_rewards(
+            request_outputs, verification_infos, task_types, config.len_reward
         )
-        # Compute normalized advantages per prompt.
-        grouped_advantages = compute_advantages_grpo(grouped_rewards)
-        end_reward_advantages = time.time()
-
-        elapsed_time = end_reward_advantages - start_reward_advantages
-        logger.info(f"Computed rewards and advantages in in {elapsed_time:.2f}s")
+        logger.info(f"Computed rewards and advantages in in {time.time() - start:.2f}s")
 
         table = get_parquet_table(
-            generated_tokens,
-            grouped_advantages,
-            grouped_rewards,
-            grouped_task_rewards,
-            grouped_length_penalties,
+            request_outputs,
+            advantages,
+            rewards,
+            task_rewards,
+            length_penalties,
             proofs,
             ckpt_step,
             target_lengths,
@@ -611,8 +494,6 @@ def inference(config: Config):
 
     # Manually destroy vLLM process group to avoid warnings
     dist.destroy_process_group()
-
-    get_process_executor().shutdown(wait=True)
 
 
 def main(config: Config) -> list[mp.Process]:
