@@ -25,6 +25,8 @@ from zeroband.training.utils import (
     offload_model_to_cpu,
     reshard_module,
     wake_up_model_from_cpu,
+    log_prompt_response_samples,
+    log_to_wandb,
 )
 
 from zeroband.utils.logger import get_logger
@@ -93,6 +95,7 @@ def train(config: Config):
 
     logger = get_logger("TRAIN")
     world_info = get_world_info()
+    wandb_sample_history = None
 
     logger.info(f"start training on {world_info.world_size} rank(s)")
 
@@ -146,10 +149,8 @@ def train(config: Config):
         num_training_steps=config.optim.total_steps,
     )
 
-    total_problems = (
-        config.start_total_problems if config.start_total_problems is not None else config.optim.batch_size * config.optim.total_steps
-    )
-    training_progress = TrainingProgress(total_tokens=0, step=config.start_step, total_problems=total_problems)
+    total_samples = config.start_total_samples if config.start_total_samples is not None else 0
+    training_progress = TrainingProgress(total_tokens=0, step=config.start_step, total_samples=total_samples)
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
@@ -254,6 +255,8 @@ def train(config: Config):
             logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
 
         logger.debug("start training rollout")
+
+        # In the training loop
         for rollout_step in range(config.optim.step_per_rollout):
             logger.debug(f"training rollout step {rollout_step} / {config.optim.step_per_rollout}")
             metric_averager = MetricsAverager()
@@ -265,6 +268,19 @@ def train(config: Config):
             data_per_rollout = next(logprobs_aware_iterator)
             num_grad_acc_steps = len(data_per_rollout)
 
+            # Collect samples for WandB logging - do this ONCE per step
+            if world_info.rank == 0 and config.wandb:
+                # Use the first batch for logging (could be configurable if needed)
+                batch = data_per_rollout[0]
+
+                # Log the samples to WandB with history management
+                try:
+                    # Pass and update the sample history
+                    wandb_sample_history = log_prompt_response_samples(tokenizer, batch, training_progress.step, wandb_sample_history)
+                except Exception as e:
+                    logger.warning(f"Error logging samples to WandB: {e}")
+
+            # Now here's the complete grad_acc_step loop WITHOUT the WandB logging inside it:
             for grad_acc_step in range(num_grad_acc_steps):
                 logger.debug(f"training grad_acc_step {grad_acc_step} / {num_grad_acc_steps}")
                 batch = data_per_rollout[grad_acc_step]
@@ -331,6 +347,8 @@ def train(config: Config):
                 loss = loss / num_grad_acc_steps
 
                 inputs_ids_shape = input_ids.shape
+
+                # Now we can delete the batch data
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
@@ -364,7 +382,7 @@ def train(config: Config):
             new_tokens = world_info.world_size * token_per_gpu
             perf_counter.count_tokens(new_tokens)
             training_progress.total_tokens += new_tokens
-            training_progress.total_problems += config.optim.batch_size
+            training_progress.total_samples += config.optim.batch_size
 
             padding_proportion = (config.data.seq_length - metric_averager["seq_lens"].item() - 1) / config.data.seq_length
 
@@ -378,7 +396,7 @@ def train(config: Config):
                 "grad_norm": grad_norm.item(),
                 "padding_proportion": padding_proportion,
                 "grad_acc_steps": num_grad_acc_steps,
-                "total_problems": training_progress.total_problems,
+                "total_samples": training_progress.total_samples,
             }
 
             for key, value in metric_averager.items():
@@ -406,7 +424,7 @@ def train(config: Config):
 
             if world_info.rank == 0:
                 if config.wandb:
-                    wandb.log(metrics)
+                    log_to_wandb(metrics)
                 if envs.PRIME_API_BASE_URL is not None:
                     monitor.log(metrics)
 
@@ -447,11 +465,15 @@ def train(config: Config):
         time_rollout_step = time.time() - time_start
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
-            new_metrics = {"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step}
-            new_metrics["time_logprob"] = time_logprob
-            new_metrics["time_data_loading"] = total_time_data_loading
-            new_metrics["time_packing"] = total_time_packing
-            wandb.log(new_metrics)
+            new_metrics = {
+                "rollout_step": rollout_step,
+                "step": training_progress.step,
+                "time_rollout_step": time_rollout_step,
+                "time_logprob": time_logprob,
+                "time_data_loading": total_time_data_loading,
+                "time_packing": total_time_packing,
+            }
+            log_to_wandb(new_metrics)
 
         if training_progress.step >= config.optim.total_steps:
             break
