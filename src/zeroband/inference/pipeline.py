@@ -55,6 +55,7 @@ def setup_comm(world_size: int, iroh_seed: int | None, iroh_peer_id: str | None)
 
     # Setup node (with or without seed)
     if iroh_seed is not None:
+        logger.debug(f"Using IROH seed: {iroh_seed}")
         # If seed is provided, create a new node with the seed
         node = Node.with_seed(num_streams=1, seed=iroh_seed)
     else:
