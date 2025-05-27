@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
   cpu-tests:
@@ -29,6 +29,7 @@ jobs:
   gpu-tests:
     name: Run GPU Tests
     runs-on: self-hosted
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
