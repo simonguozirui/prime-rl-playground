@@ -1,11 +1,10 @@
 import pickle
 import time
 from functools import partial
-from typing import Tuple
+from typing import Tuple, Optional, Any
 
 import torch
 import torch.nn as nn
-from prime_iroh import Node
 from pydantic_config import BaseConfig
 from vllm import LLM
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -26,7 +25,41 @@ class PipelineConfig(BaseConfig):
     iroh_peer_id: str | None = None
 
 
-def setup_pipeline(llm: LLM, rank: int, world_size: int, iroh_seed: int | None = None, iroh_peer_id: str | None = None) -> Node:
+# Create a dummy Node class for when prime_iroh is not available
+class DummyNode:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def node_id(self):
+        return "dummy"
+
+    def connect(self, *args, **kwargs):
+        pass
+
+    def is_ready(self):
+        return True
+
+    def isend(self, *args, **kwargs):
+        return DummyRequest()
+
+    def irecv(self, *args, **kwargs):
+        return DummyRequest()
+
+
+class DummyRequest:
+    def wait(self):
+        return None
+
+
+# Try to import Node from prime_iroh, use DummyNode if not available
+try:
+    from prime_iroh import Node
+except ImportError:
+    Node = DummyNode
+    logger.warning("prime_iroh not available, using dummy implementation")
+
+
+def setup_pipeline(llm: LLM, rank: int, world_size: int, iroh_seed: int | None = None, iroh_peer_id: str | None = None) -> Any:
     """
     Setup PRIME-IROH communication and hooks for pipeline parallel inference.
 
@@ -37,12 +70,17 @@ def setup_pipeline(llm: LLM, rank: int, world_size: int, iroh_seed: int | None =
         iroh_seed: The seed for the PRIME-IROH node (optional, will lead to deterministic connection strings)
         iroh_peer_id: The peer ID for the PRIME-IROH node (optional)
     """
+    if world_size <= 1:
+        logger.info("Pipeline parallelism not enabled (world_size <= 1)")
+        return None
+
     logger.info(f"Setting up pipeline parallelism (pp.rank={rank}, pp.world_size={world_size})")
     node = setup_comm(world_size=world_size, iroh_seed=iroh_seed, iroh_peer_id=iroh_peer_id)
     setup_hooks(rank=rank, world_size=world_size, llm=llm, node=node)
+    return node
 
 
-def setup_comm(world_size: int, iroh_seed: int | None, iroh_peer_id: str | None) -> Node:
+def setup_comm(world_size: int, iroh_seed: int | None, iroh_peer_id: str | None) -> Any:
     """
     Setup communication via PRIME-IROH. Forms a ring topology between the model shards
     with unidirectional communication flow.
@@ -52,7 +90,8 @@ def setup_comm(world_size: int, iroh_seed: int | None, iroh_peer_id: str | None)
         iroh_seed: The seed for the PRIME-IROH node (optional, will lead to deterministic connection strings)
         iroh_peer_id: The peer ID for the PRIME-IROH node (optional)
     """
-    assert world_size > 1, "Pipeline parallel inference requires at least 2 stages"
+    if world_size <= 1:
+        return DummyNode()
 
     # Setup node (with or without seed)
     if iroh_seed is not None:
@@ -82,7 +121,7 @@ def setup_comm(world_size: int, iroh_seed: int | None, iroh_peer_id: str | None)
     return node
 
 
-def setup_hooks(rank: int, world_size: int, llm: LLM, node: Node) -> None:
+def setup_hooks(rank: int, world_size: int, llm: LLM, node: Any) -> None:
     """
     Setup hooks to enable pipeline parallel inference based on pipeline topology.
 
@@ -92,7 +131,8 @@ def setup_hooks(rank: int, world_size: int, llm: LLM, node: Node) -> None:
         llm: The LLM model shard instance
         node: The node class instances for communication
     """
-    assert world_size > 1, "Pipeline parallel inference requires at least 2 stages"
+    if world_size <= 1:
+        return
 
     # Model runner owns sampler, model owns layers
     model_runner: nn.Module = llm.llm_engine.model_executor.driver_worker.model_runner
@@ -139,7 +179,7 @@ def setup_hooks(rank: int, world_size: int, llm: LLM, node: Node) -> None:
 
 
 # TODO: Outputs of decoder blocks look different for vLLM implementations and HF-based implementations. The implementation currently breaks for HF-based implementations.
-def send_intermediate_states(_, __, output: Tuple, node: Node) -> None:
+def send_intermediate_states(_, __, output: Tuple, node: Any) -> None:
     """
     A post-hook that sends the hidden states and residual of the last decoder layer to the next stage node's first layer.
 
@@ -149,6 +189,9 @@ def send_intermediate_states(_, __, output: Tuple, node: Node) -> None:
         output: The output of the module (here the decoder layer output)
         node: The node that is being hooked
     """
+    if isinstance(node, DummyNode):
+        return
+
     hidden_states, residual = output
     serialized_hidden_states = pickle.dumps(hidden_states.to("cpu"))
     serialized_residual = pickle.dumps(residual.to("cpu"))
@@ -159,7 +202,7 @@ def send_intermediate_states(_, __, output: Tuple, node: Node) -> None:
     )
 
 
-def recv_intermediate_states(_, input: Tuple, node: Node) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def recv_intermediate_states(_, input: Tuple, node: Any) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     A pre-hook that receives the hidden states and residual from the previous stage node's last layer at the first layer of the current node.
 
@@ -170,6 +213,9 @@ def recv_intermediate_states(_, input: Tuple, node: Node) -> Tuple[torch.Tensor,
         input: The input to the module (here the positions, hidden states and residual of the previous node's last layer)
         node: The node class instances for communication
     """
+    if isinstance(node, DummyNode):
+        return input
+
     positions, _, _ = input
     device = positions.device
     serialized_hidden_states = node.irecv(tag=0).wait()
@@ -183,7 +229,7 @@ def recv_intermediate_states(_, input: Tuple, node: Node) -> Tuple[torch.Tensor,
     return positions, hidden_states, residuals
 
 
-def recv_output(_, __, output, node: Node, relay=False) -> SamplerOutput:
+def recv_output(_, __, output, node: Any, relay=False) -> SamplerOutput:
     """
     A post-hook that receives sampling outputs from the last stage node and optionally relays them to the next stage node.
     For a pipeline with 4 stages, this hook should be registered as follows:
@@ -202,6 +248,9 @@ def recv_output(_, __, output, node: Node, relay=False) -> SamplerOutput:
         node: The node class instances for communication
         relay: Whether to relay the outputs to the next stage node
     """
+    if isinstance(node, DummyNode):
+        return output
+
     serialized_output = node.irecv(tag=0).wait()
     logger.debug(f"Received outputs ({len(serialized_output)} bytes)")
     if relay:
@@ -211,7 +260,7 @@ def recv_output(_, __, output, node: Node, relay=False) -> SamplerOutput:
     return output
 
 
-def send_output(_, __, output: SamplerOutput, node: Node) -> None:
+def send_output(_, __, output: SamplerOutput, node: Any) -> None:
     """
     A post-hook that sends the sampling outputs from the last stage node to the first stage node.
 
@@ -221,6 +270,9 @@ def send_output(_, __, output: SamplerOutput, node: Node) -> None:
         output: The outputs of the module
         node: The node class instances for communication
     """
+    if isinstance(node, DummyNode):
+        return
+
     serialized_output = pickle.dumps(output)
     node.isend(serialized_output, tag=0, latency=None).wait()
     logger.debug(f"Sent outputs ({len(serialized_output)} bytes)")
